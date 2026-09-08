@@ -10,36 +10,40 @@
 - **Windows и Linux** — версия на Python и faster-whisper: значок в области
   уведомлений, та же логика распознавания. Подробности в [other/README.md](other/README.md).
 
-Везде установка одной командой. Репозиторий приватный, поэтому в командах
-`gh` (GitHub CLI, залогиненный) — без него подставь `git clone
-https://github.com/axepq/f5voice.git` с логином и токеном.
+## Установка одной командой
 
-## Установка
+Ничего заранее ставить не нужно: команда сама скачает недостающее и всё настроит.
 
-**macOS** (Terminal):
+**macOS** — открой Терминал (Cmd+Space, набрать Terminal), вставь и нажми Enter:
 
 ```
-gh repo clone axepq/f5voice ~/.f5voice/src && ~/.f5voice/src/install.sh
+curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
 ```
 
-**Linux** (X11; под Wayland см. ниже):
+Если появится окно про Command Line Tools — нажми «Установить» и подожди,
+команда продолжит сама. В конце macOS спросит два разрешения: Микрофон и
+Универсальный доступ.
+
+**Windows** — открой PowerShell (Пуск, набрать PowerShell), вставь и нажми Enter:
 
 ```
-gh repo clone axepq/f5voice ~/.f5voice/src && ~/.f5voice/src/other/install-linux.sh
+irm https://raw.githubusercontent.com/axepq/f5voice/main/get.ps1 | iex
 ```
 
-**Windows** (PowerShell):
+**Linux** — в терминале:
 
 ```
-gh repo clone axepq/f5voice "$HOME\.f5voice\src"; powershell -ExecutionPolicy Bypass -File "$HOME\.f5voice\src\other\install.ps1"
+curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
 ```
 
-Каждый установщик ставит недостающее (на Windows Python и Git через winget,
-на Linux portaudio и xclip через apt/dnf/pacman), создаёт окружение в
-`~/.f5voice`, скачивает модель, проверяет ядро, включает автозапуск и
-запускает F5Voice. На Linux и Windows клавиша по умолчанию Ctrl+Alt+Space,
-удаление — `other/uninstall-linux.sh` и `other/uninstall.ps1`. На Linux под
-Wayland глобальные клавиши недоступны: установщик подскажет назначить
+Установка занимает несколько минут: скачивается модель распознавания
+(около 1,5 ГБ) и Python-пакеты. На Windows при отсутствии Python и Git они
+ставятся через winget, на Linux пакеты ставятся через apt, dnf или pacman
+(спросит пароль). Автозапуск включается сам. На Linux и Windows клавиша по
+умолчанию Ctrl+Alt+Space, на маке F5. Повторный запуск той же команды
+обновляет установку. Удаление: `~/.f5voice/src/uninstall.sh` на маке,
+`other/uninstall-linux.sh` и `other/uninstall.ps1` на остальных. На Linux
+под Wayland глобальные клавиши недоступны: установщик подскажет назначить
 сочетание рабочего стола на команду `dictate.py --toggle`.
 
 ### macOS подробнее
@@ -142,6 +146,7 @@ F13–F20 ловятся напрямую.
 
 | | |
 |---|---|
+| `get.sh`, `get.ps1` | загрузчики для команды установки: ставят git, клонируют, запускают установщик |
 | `install.sh`, `uninstall.sh` | установка и удаление на macOS |
 | `macos/main.swift` | приложение: перехват клавиши, запись, плашка, меню, печать |
 | `macos/worker.py` | воркер mlx-whisper |

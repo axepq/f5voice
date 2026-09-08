@@ -19,11 +19,18 @@ fail() { print -P "%F{red}✗%f $1" >&2; exit 1; }
 OSV="$(sw_vers -productVersion)"
 [[ "${OSV%%.*}" -ge 14 ]] || fail "Нужна macOS 14 или новее, сейчас $OSV"
 
-if ! xcode-select -p >/dev/null 2>&1 || ! command -v swiftc >/dev/null 2>&1; then
-    step "Нужны Command Line Tools (swiftc, git, python3). Запускаю их установку — подтверди в окне и запусти этот скрипт снова."
-    xcode-select --install 2>/dev/null || true
-    exit 1
+if ! xcode-select -p >/dev/null 2>&1; then
+    step "Нужны Command Line Tools от Apple (git, python, компилятор). Сейчас появится окно — нажми «Установить» и дождись конца, я подожду."
+    xcode-select --install >/dev/null 2>&1 || true
+    waited=0
+    until xcode-select -p >/dev/null 2>&1; do
+        sleep 10
+        waited=$((waited + 10))
+        [[ $waited -ge 3600 ]] && fail "Command Line Tools так и не появились. Поставь их и запусти установщик снова."
+    done
+    sleep 5
 fi
+command -v swiftc >/dev/null 2>&1 || fail "не найден swiftc — переустанови Command Line Tools: xcode-select --install"
 
 mkdir -p "$HOME_DIR"
 

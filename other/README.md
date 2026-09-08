@@ -11,20 +11,22 @@ Windows/Linux не проверялась. Если что-то падает, п
 
 ## Установка одной командой
 
-Linux:
+Linux, в терминале:
 
 ```
-gh repo clone axepq/f5voice ~/.f5voice/src && ~/.f5voice/src/other/install-linux.sh
+curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
 ```
 
-Windows, PowerShell:
+Windows, в PowerShell:
 
 ```
-gh repo clone axepq/f5voice "$HOME\.f5voice\src"; powershell -ExecutionPolicy Bypass -File "$HOME\.f5voice\src\other\install.ps1"
+irm https://raw.githubusercontent.com/axepq/f5voice/main/get.ps1 | iex
 ```
 
-Без `gh`: `git clone https://github.com/axepq/f5voice.git` в ту же папку и
-запустить установщик из неё (репозиторий приватный, git спросит логин и токен).
+Загрузчик ставит git (на Windows через winget), скачивает исходники в
+`~/.f5voice/src` и запускает установщик. Вручную: `git clone
+https://github.com/axepq/f5voice.git ~/.f5voice/src`, затем
+`other/install-linux.sh` или `other/install.ps1`.
 
 Что делает установщик: ставит недостающее (Windows — Python 3.12 и Git через
 winget; Linux — python3-venv, libportaudio2, xclip через apt/dnf/pacman),
