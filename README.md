@@ -8,16 +8,18 @@
 - **macOS на Apple Silicon** — основная версия: приложение в строке меню,
   плашка Liquid Glass, mlx-whisper на GPU.
 - **Windows и Linux** — версия на Python и faster-whisper: значок в области
-  уведомлений, та же логика распознавания. Подробности в [other/README.md](other/README.md).
+  уведомлений, та же логика распознавания. Подробности в [python/README.md](python/README.md).
 
 ## Установка одной командой
 
-Ничего заранее ставить не нужно: команда сама скачает недостающее и всё настроит.
+Для каждой системы свой установочный файл. Он сам ставит недостающее,
+создаёт отдельное окружение в `~/.f5voice` и запускает F5Voice. Заранее
+ничего ставить не нужно.
 
 **macOS** — открой Терминал (Cmd+Space, набрать Terminal), вставь и нажми Enter:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh | bash
 ```
 
 Если появится окно про Command Line Tools — нажми «Установить» и подожди,
@@ -27,13 +29,13 @@ curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
 **Windows** — открой PowerShell (Пуск, набрать PowerShell), вставь и нажми Enter:
 
 ```
-irm https://raw.githubusercontent.com/axepq/f5voice/main/get.ps1 | iex
+irm https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
 ```
 
 **Linux** — в терминале:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh | bash
 ```
 
 Установка занимает несколько минут: скачивается модель распознавания
@@ -41,10 +43,13 @@ curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
 ставятся через winget, на Linux пакеты ставятся через apt, dnf или pacman
 (спросит пароль). Автозапуск включается сам. На Linux и Windows клавиша по
 умолчанию Ctrl+Alt+Space, на маке F5. Повторный запуск той же команды
-обновляет установку. Удаление: `~/.f5voice/src/uninstall.sh` на маке,
-`other/uninstall-linux.sh` и `other/uninstall.ps1` на остальных. На Linux
-под Wayland глобальные клавиши недоступны: установщик подскажет назначить
-сочетание рабочего стола на команду `dictate.py --toggle`.
+обновляет установку. Удаление: `uninstall-macos.sh`, `uninstall-linux.sh`,
+`uninstall-windows.ps1` в `~/.f5voice/src`. На Linux под Wayland глобальные
+клавиши недоступны: установщик подскажет назначить сочетание рабочего стола
+на команду `dictate.py --toggle`.
+
+Те же файлы работают и из клона репозитория: `./install-macos.sh`,
+`./install-linux.sh`, `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`.
 
 ### macOS подробнее
 
@@ -56,8 +61,8 @@ curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
 безопасность → включить F5Voice). Пока второго нет, иконка микрофона в
 строке меню перечёркнута.
 
-Обновление: `git -C ~/.f5voice/src pull && ~/.f5voice/src/install.sh`.
-Разрешения после пересборки сохраняются. Удаление: `~/.f5voice/src/uninstall.sh`.
+Обновление: повторить команду установки. Разрешения после пересборки
+сохраняются. Удаление: `~/.f5voice/src/uninstall-macos.sh`.
 
 ## Как пользоваться
 
@@ -146,14 +151,13 @@ F13–F20 ловятся напрямую.
 
 | | |
 |---|---|
-| `get.sh`, `get.ps1` | загрузчики для команды установки: ставят git, клонируют, запускают установщик |
-| `install.sh`, `uninstall.sh` | установка и удаление на macOS |
-| `macos/main.swift` | приложение: перехват клавиши, запись, плашка, меню, печать |
+| `install-macos.sh`, `install-linux.sh`, `install-windows.ps1` | установщики, по одному на систему, самодостаточные |
+| `uninstall-macos.sh`, `uninstall-linux.sh`, `uninstall-windows.ps1` | удаление |
+| `macos/main.swift` | приложение для macOS: перехват клавиши, запись, плашка, меню, печать |
 | `macos/worker.py` | воркер mlx-whisper |
+| `python/dictate.py` | версия для Windows и Linux на faster-whisper |
 | `common/` | общее ядро: `audio_io`, `vad`, `textproc` (команды), `segments`, `selftest` |
-| `other/dictate.py` | версия для Windows/Linux на faster-whisper |
-| `other/install-linux.sh`, `other/install.ps1` | установщики для Linux и Windows, рядом деинсталляторы |
-| `~/.f5voice/` | установленное: `F5Voice.app`, `venv`, `config.json`, `f5voice.log`, `last.wav` |
+| `~/.f5voice/` | установленное: приложение или окружение, `config.json`, `f5voice.log`, `last.wav`, `src` |
 
 Самопроверка ядра без модели: `python -m common.selftest`.
 Если распознало криво — последняя запись лежит в `~/.f5voice/last.wav`,

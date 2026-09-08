@@ -755,7 +755,7 @@ final class App: NSObject, NSApplicationDelegate {
 
     @objc private func openConfig() {
         if !FileManager.default.fileExists(atPath: configPath) {
-            let example = homeDir + "/src/config.example.json"
+            let example = homeDir + "/src/macos/config.example.json"
             try? FileManager.default.copyItem(atPath: example, toPath: configPath)
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: configPath))

@@ -14,19 +14,19 @@ Windows/Linux не проверялась. Если что-то падает, п
 Linux, в терминале:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh | bash
 ```
 
 Windows, в PowerShell:
 
 ```
-irm https://raw.githubusercontent.com/axepq/f5voice/main/get.ps1 | iex
+irm https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
 ```
 
-Загрузчик ставит git (на Windows через winget), скачивает исходники в
-`~/.f5voice/src` и запускает установщик. Вручную: `git clone
-https://github.com/axepq/f5voice.git ~/.f5voice/src`, затем
-`other/install-linux.sh` или `other/install.ps1`.
+Установщик сам ставит недостающее (git, на Windows и Python — через winget),
+скачивает исходники в `~/.f5voice/src`, создаёт своё окружение и запускает
+F5Voice. Из клона репозитория: `./install-linux.sh` или
+`powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`.
 
 Что делает установщик: ставит недостающее (Windows — Python 3.12 и Git через
 winget; Linux — python3-venv, libportaudio2, xclip через apt/dnf/pacman),
@@ -36,7 +36,7 @@ winget; Linux — python3-venv, libportaudio2, xclip через apt/dnf/pacman),
 запускает F5Voice в фоне с логом в `~/.f5voice/f5voice.log`.
 
 Обновление: `git -C ~/.f5voice/src pull` и снова установщик.
-Удаление: `other/uninstall-linux.sh` или `other/uninstall.ps1`.
+Удаление: `uninstall-linux.sh` или `uninstall-windows.ps1` в корне репозитория.
 
 ## Как пользоваться
 
@@ -46,7 +46,7 @@ Ctrl+Alt+Space — запись (короткий сигнал), ещё раз �
 
 ## Настройки — `~/.f5voice/config.json`
 
-После правки перезапустить: Linux — `pkill -f other/dictate.py` и снова
+После правки перезапустить: Linux — `pkill -f python/dictate.py` и снова
 запустить из автозапуска или командой ниже; Windows — «Выход» в меню значка и
 ярлык F5Voice в автозагрузке (или перезайти в систему).
 
@@ -64,10 +64,10 @@ Ctrl+Alt+Space — запись (короткий сигнал), ещё раз �
 ## Команды
 
 ```
-~/.f5voice/venv/bin/python ~/.f5voice/src/other/dictate.py --log          запустить в фоне (Linux)
-~/.f5voice/venv/bin/python ~/.f5voice/src/other/dictate.py --toggle       начать/закончить запись извне
-~/.f5voice/venv/bin/python ~/.f5voice/src/other/dictate.py --file a.wav   проверить распознавание на файле
-~/.f5voice/venv/bin/python ~/.f5voice/src/other/dictate.py --list-devices микрофоны
+~/.f5voice/venv/bin/python ~/.f5voice/src/python/dictate.py --log          запустить в фоне (Linux)
+~/.f5voice/venv/bin/python ~/.f5voice/src/python/dictate.py --toggle       начать/закончить запись извне
+~/.f5voice/venv/bin/python ~/.f5voice/src/python/dictate.py --file a.wav   проверить распознавание на файле
+~/.f5voice/venv/bin/python ~/.f5voice/src/python/dictate.py --list-devices микрофоны
 ```
 
 На Windows вместо `venv/bin/python` — `venv\Scripts\python.exe`; `--toggle`

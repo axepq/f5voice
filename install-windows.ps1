@@ -1,44 +1,33 @@
-﻿# Установка F5Voice на Windows одной командой (PowerShell):
-#   gh repo clone axepq/f5voice "$HOME\.f5voice\src"; powershell -ExecutionPolicy Bypass -File "$HOME\.f5voice\src\other\install.ps1"
-# Ставит Python и Git через winget, если их нет, окружение с faster-whisper, скачивает
-# модель, добавляет ярлык в автозагрузку и запускает сейчас (без консоли, значок в трее).
+﻿# F5Voice для Windows: установка одной командой (PowerShell).
+#   irm https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
+# Можно и из клона репозитория: powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
+# Ставит Git и Python через winget (если их нет), своё Python-окружение с faster-whisper,
+# скачивает модель, добавляет ярлык в автозагрузку и запускает (без консоли, значок в трее).
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Step($m) { Write-Host "> $m" -ForegroundColor Cyan }
 function Fail($m) { Write-Host "x $m" -ForegroundColor Red; exit 1 }
+function Refresh-Path {
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+}
+function Winget-Install($id, $what) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "Нет winget. Обнови Windows (нужен App Installer из Microsoft Store) или поставь $what сам и запусти снова." }
+    Step "Ставлю $what через winget"
+    winget install -e --id $id --accept-package-agreements --accept-source-agreements | Out-Null
+    Refresh-Path
+}
 
 $RepoUrl = "https://github.com/axepq/f5voice.git"
 $HomeDir = if ($env:F5VOICE_HOME) { $env:F5VOICE_HOME } else { Join-Path $HOME ".f5voice" }
 $Src = Join-Path $HomeDir "src"
 New-Item -ItemType Directory -Force -Path $HomeDir | Out-Null
 
-function Refresh-Path {
-    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
-}
-
-function Test-Python($exe) {
-    try {
-        $v = & $exe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $v -and ([version]$v -ge [version]"3.9")) { return $true }
-    } catch {}
-    return $false
-}
-
-$Py = $null
-foreach ($c in @("python", "python3")) { if (-not $Py -and (Test-Python $c)) { $Py = $c } }
-if (-not $Py) {
-    Step "Python не найден - ставлю Python 3.12 через winget"
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "нет winget: поставь Python 3.12 с python.org (галочка Add to PATH) и запусти снова" }
-    winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements | Out-Null
-    Refresh-Path
-    if (Test-Python "python") { $Py = "python" } else { Fail "Python поставлен, но не виден в PATH: открой новое окно PowerShell и запусти установщик снова" }
-}
-
-# Исходники: запуск из клона репозитория или скачать.
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoDir = Split-Path -Parent $ScriptDir
-if (Test-Path (Join-Path $RepoDir "other\dictate.py")) {
+# Откуда исходники: запущены из файла внутри клона — используем его,
+# иначе (irm | iex) скачиваем репозиторий и перезапускаемся из него.
+$ScriptPath = $MyInvocation.MyCommand.Path
+$RepoDir = if ($ScriptPath) { Split-Path -Parent $ScriptPath } else { $null }
+if ($RepoDir -and (Test-Path (Join-Path $RepoDir "python\dictate.py"))) {
     $resolved = if (Test-Path $Src) { (Get-Item $Src).Target } else { $null }
     if (($RepoDir -ne $Src) -and ($resolved -ne $RepoDir)) {
         if ((Test-Path $Src) -and -not ((Get-Item $Src).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -50,24 +39,42 @@ if (Test-Path (Join-Path $RepoDir "other\dictate.py")) {
     }
 } else {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Step "Git не найден - ставлю через winget"
-        winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements | Out-Null
-        Refresh-Path
+        Winget-Install "Git.Git" "Git"
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "Git поставлен, но не виден: открой новое окно PowerShell и запусти команду снова." }
     }
-    if (Test-Path (Join-Path $Src ".git")) { Step "Обновляю исходники"; git -C $Src pull --ff-only }
-    else { Step "Скачиваю исходники"; git clone --depth 1 $RepoUrl $Src }
+    if (Test-Path (Join-Path $Src ".git")) { Step "Обновляю исходники F5Voice"; git -C $Src pull --ff-only --quiet }
+    else {
+        if (Test-Path $Src) { Fail "$Src уже существует, но это не репозиторий. Убери его и запусти команду снова." }
+        Step "Скачиваю F5Voice"; git clone --depth 1 --quiet $RepoUrl $Src
+    }
     if ($LASTEXITCODE -ne 0) { Fail "git не смог получить исходники" }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Src "install-windows.ps1")
+    exit $LASTEXITCODE
+}
+
+function Test-Python($exe) {
+    try {
+        $v = & $exe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $v -and ([version]$v -ge [version]"3.9")) { return $true }
+    } catch {}
+    return $false
+}
+$Py = $null
+foreach ($c in @("python", "python3")) { if (-not $Py -and (Test-Python $c)) { $Py = $c } }
+if (-not $Py) {
+    Winget-Install "Python.Python.3.12" "Python 3.12"
+    if (Test-Python "python") { $Py = "python" } else { Fail "Python поставлен, но не виден в PATH: открой новое окно PowerShell и запусти установщик снова" }
 }
 
 Step "Python-окружение"
 $VenvPy = Join-Path $HomeDir "venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPy)) { & $Py -m venv (Join-Path $HomeDir "venv"); if ($LASTEXITCODE -ne 0) { Fail "не создался venv" } }
 & $VenvPy -m pip install --quiet --upgrade pip
-& $VenvPy -m pip install --quiet -r (Join-Path $Src "other\requirements.txt")
+& $VenvPy -m pip install --quiet -r (Join-Path $Src "python\requirements.txt")
 if ($LASTEXITCODE -ne 0) { Fail "pip не смог поставить зависимости" }
 
 $Config = Join-Path $HomeDir "config.json"
-if (-not (Test-Path $Config)) { Copy-Item (Join-Path $Src "other\config.example.json") $Config }
+if (-not (Test-Path $Config)) { Copy-Item (Join-Path $Src "python\config.example.json") $Config }
 $Cfg = Get-Content $Config -Raw -Encoding UTF8 | ConvertFrom-Json
 $Model = if ($Cfg.model) { $Cfg.model } else { "large-v3-turbo" }
 $Hotkey = if ($Cfg.hotkey) { $Cfg.hotkey } else { "<ctrl>+<alt>+space" }
@@ -86,7 +93,7 @@ if ($selftest -ne 0) { Fail "самопроверка ядра не прошла
 Step "Автозагрузка"
 $Startup = [Environment]::GetFolderPath("Startup")
 $PythonW = Join-Path $HomeDir "venv\Scripts\pythonw.exe"
-$Script = Join-Path $Src "other\dictate.py"
+$Script = Join-Path $Src "python\dictate.py"
 $Shell = New-Object -ComObject WScript.Shell
 $Lnk = $Shell.CreateShortcut((Join-Path $Startup "F5Voice.lnk"))
 $Lnk.TargetPath = $PythonW
@@ -97,7 +104,7 @@ $Lnk.Save()
 
 Step "Запуск"
 Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -like "*other\dictate.py*" } |
+    Where-Object { $_.CommandLine -like "*python\dictate.py*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Process -FilePath $PythonW -ArgumentList "`"$Script`" --log" -WorkingDirectory $HomeDir
 

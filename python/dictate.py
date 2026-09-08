@@ -5,10 +5,10 @@
 приоритетом русского, детектор речи, голосовые команды, чистка галлюцинаций.
 Модель — faster-whisper (CTranslate2), на CPU или CUDA.
 
-Запуск:            python other/dictate.py            (в фоне: --log, вывод в ~/.f5voice/f5voice.log)
-Переключить извне: python other/dictate.py --toggle   (для сочетаний клавиш рабочего стола, Wayland)
-Проверка на файле: python other/dictate.py --file запись.wav
-Устройства ввода:  python other/dictate.py --list-devices
+Запуск:            python python/dictate.py            (в фоне: --log, вывод в ~/.f5voice/f5voice.log)
+Переключить извне: python python/dictate.py --toggle   (для сочетаний клавиш рабочего стола, Wayland)
+Проверка на файле: python python/dictate.py --file запись.wav
+Устройства ввода:  python python/dictate.py --list-devices
 Настройки:         ~/.f5voice/config.json (создаётся при первом запуске)
 
 Собрано на macOS, на настоящих Windows/Linux автором не проверялось. Если
@@ -402,10 +402,10 @@ class App:
             self.hotkeys.start()
             log(f"готов: {self.cfg['hotkey']} — диктовка, Esc — отмена, Ctrl+C — выход.")
         except Exception as e:  # noqa: BLE001
-            log(f"! глобальная клавиша не заработала ({e}). Переключай командой: python other/dictate.py --toggle")
+            log(f"! глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":
             log("Wayland: глобальные клавиши через pynput не работают. Назначь в настройках рабочего стола "
-                "сочетание на команду «python other/dictate.py --toggle».")
+                "сочетание на команду «python python/dictate.py --toggle».")
 
     def run(self):
         PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
@@ -443,7 +443,7 @@ def send_signal(name):
         os.kill(pid, getattr(signal, name))
         return 0
     except (FileNotFoundError, ValueError, ProcessLookupError):
-        print("F5Voice не запущен: python other/dictate.py --log &")
+        print("F5Voice не запущен: python python/dictate.py --log &")
         return 1
 
 
