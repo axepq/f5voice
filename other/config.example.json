@@ -1,0 +1,14 @@
+{
+  "hotkey": "<ctrl>+<alt>+space",
+  "languages": "ru,en",
+  "alt_language_min_prob": 0.95,
+  "model": "large-v3-turbo",
+  "device": "auto",
+  "compute_type": "auto",
+  "prompt": "",
+  "trailing_space": true,
+  "max_record_seconds": 180,
+  "typing": "type",
+  "newline": "shift+enter",
+  "input_device": null
+}

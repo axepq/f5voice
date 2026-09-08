@@ -1,0 +1,1064 @@
+// F5Voice — локальная диктовка по горячей клавише вместо системной (macOS, Apple Silicon).
+//
+// Как устроено:
+//   1. Горячая клавиша берётся из ~/.f5voice/config.json ("hotkey": "F5" по умолчанию).
+//      F1–F12 на клавиатурах Apple в медиарежиме шлют не клавишу, а медиакод, поэтому
+//      hidutil переводит и клавишу, и её медиакод в F17, которую никто не использует.
+//      Сочетания с модификаторами (cmd+shift+space) и F13–F20 ловятся напрямую.
+//   2. Перехват клавиш (CGEventTap): первое нажатие — запись, второе — стоп и
+//      распознавание. Esc — отмена записи или распознавания.
+//   3. Звук пишется в ~/.f5voice/last.wav (16 кГц, моно), путь уходит воркеру
+//      worker.py, который держит модель whisper в памяти и отвечает текстом.
+//   4. Текст печатается в активное поле как обычный ввод с клавиатуры.
+//
+// Сборка: macos/build.sh   Настройки: ~/.f5voice/config.json   Лог: ~/.f5voice/f5voice.log
+
+import AVFoundation
+import Cocoa
+import Symbols
+
+// MARK: - Пути и настройки
+
+let homeDir = ProcessInfo.processInfo.environment["F5VOICE_HOME"] ?? NSHomeDirectory() + "/.f5voice"
+let configPath = homeDir + "/config.json"
+let workerScript = homeDir + "/src/macos/worker.py"
+let python = homeDir + "/venv/bin/python"
+let lastWav = homeDir + "/last.wav"
+let logPath = homeDir + "/f5voice.log"
+let launchdLabel = "com.alex.f5voice"
+let cancelCode: Int64 = 53                 // Esc
+let spareKeyCode: CGKeyCode = 64           // F17: сюда hidutil переводит выбранную F-клавишу
+let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клавиатуры
+let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
+
+struct Config {
+    var hotkey = "F5"
+    var languages = "ru,en"
+    var altLanguageMinProb = 0.95
+    var model = "mlx-community/whisper-large-v3-turbo"
+    var prompt = ""
+    var trailingSpace = true
+    var maxRecordSeconds = 180.0
+    var idleUnloadMinutes = 15.0
+    var newlineInTerminals = "option"   // option | shift | none
+    var newlineElsewhere = "shift"
+
+    static func load() -> Config {
+        var c = Config()
+        guard let data = FileManager.default.contents(atPath: configPath),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            log("настройки не прочитаны (\(configPath)) — работаю по умолчанию")
+            return c
+        }
+        if let v = obj["hotkey"] as? String, !v.isEmpty { c.hotkey = v }
+        if let v = obj["languages"] as? String, !v.isEmpty { c.languages = v }
+        if let v = obj["alt_language_min_prob"] as? Double { c.altLanguageMinProb = v }
+        if let v = obj["model"] as? String, !v.isEmpty { c.model = v }
+        if let v = obj["prompt"] as? String { c.prompt = v }
+        if let v = obj["trailing_space"] as? Bool { c.trailingSpace = v }
+        if let v = obj["max_record_seconds"] as? Double { c.maxRecordSeconds = v }
+        if let v = obj["idle_unload_minutes"] as? Double { c.idleUnloadMinutes = v }
+        if let v = obj["newline_in_terminals"] as? String { c.newlineInTerminals = v }
+        if let v = obj["newline_elsewhere"] as? String { c.newlineElsewhere = v }
+        return c
+    }
+
+    /// Всё, что требует перезапуска воркера.
+    var workerSignature: String { "\(languages)|\(altLanguageMinProb)|\(model)|\(prompt)|\(idleUnloadMinutes)" }
+}
+
+// MARK: - Горячая клавиша
+
+struct HotKey {
+    var keyCode: CGKeyCode
+    var flags: CGEventFlags
+    var fKey: Int?          // номер F-клавиши 1…12, если её надо переводить через hidutil
+    var title: String
+
+    static let modifierMask: CGEventFlags = [.maskCommand, .maskShift, .maskAlternate, .maskControl]
+
+    static let keyCodes: [String: CGKeyCode] = [
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+        "f9": 101, "f10": 109, "f11": 103, "f12": 111, "f13": 105, "f14": 107, "f15": 113,
+        "f16": 106, "f17": 64, "f18": 79, "f19": 80, "f20": 90,
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11,
+        "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21,
+        "6": 22, "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29, "]": 30, "o": 31,
+        "u": 32, "[": 33, "i": 34, "p": 35, "return": 36, "enter": 36, "l": 37, "j": 38, "'": 39,
+        "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48,
+        "space": 49, "`": 50, "delete": 51, "backspace": 51, "escape": 53, "esc": 53,
+        "home": 115, "pageup": 116, "forwarddelete": 117, "end": 119, "pagedown": 121,
+        "left": 123, "right": 124, "down": 125, "up": 126,
+    ]
+
+    /// "F5", "cmd+shift+space", "ctrl+alt+d", "F13"
+    static func parse(_ spec: String) -> HotKey? {
+        var flags: CGEventFlags = []
+        var key: String?
+        for raw in spec.lowercased().split(separator: "+") {
+            let part = raw.trimmingCharacters(in: .whitespaces)
+            switch part {
+            case "cmd", "command", "⌘": flags.insert(.maskCommand)
+            case "shift", "⇧": flags.insert(.maskShift)
+            case "alt", "option", "opt", "⌥": flags.insert(.maskAlternate)
+            case "ctrl", "control", "⌃": flags.insert(.maskControl)
+            default: key = part
+            }
+        }
+        guard let k = key, let code = keyCodes[k] else { return nil }
+        var fKey: Int?
+        if k.hasPrefix("f"), let n = Int(k.dropFirst()), (1...12).contains(n) { fKey = n }
+        let mods = [(CGEventFlags.maskControl, "⌃"), (.maskAlternate, "⌥"), (.maskShift, "⇧"), (.maskCommand, "⌘")]
+            .filter { flags.contains($0.0) }.map { $0.1 }.joined()
+        return HotKey(keyCode: code, flags: flags, fKey: fKey, title: mods + k.uppercased())
+    }
+
+    /// Код, который реально приходит в перехват: F-клавиши 1…12 переведены в F17.
+    var effectiveKeyCode: CGKeyCode { fKey != nil ? spareKeyCode : keyCode }
+
+    func matches(_ event: CGEvent) -> Bool {
+        guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(effectiveKeyCode) else { return false }
+        return event.flags.intersection(HotKey.modifierMask) == flags
+    }
+}
+
+// MARK: - Служебное
+
+let logFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return f
+}()
+
+func log(_ s: String) {
+    let line = "\(logFormatter.string(from: Date())) \(s)\n"
+    FileHandle.standardError.write(line.data(using: .utf8)!)
+}
+
+@discardableResult
+func sh(_ path: String, _ args: [String]) -> (Int32, String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = pipe
+    do { try p.run() } catch { return (-1, "\(error)") }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+}
+
+/// Медиакод, который клавиатура Apple шлёт вместо F-клавиши в медиарежиме
+/// (из FnFunctionUsageMap драйвера), в кодировке hidutil: страница << 32 | код.
+func mediaUsage(forFKey n: Int) -> UInt64? {
+    let (code, out) = sh("/usr/sbin/ioreg", ["-l", "-w0"])
+    guard code == 0,
+          let range = out.range(of: #""FnFunctionUsageMap" = "([^"]*)""#, options: .regularExpression)
+    else { return nil }
+    let map = String(out[range]).components(separatedBy: "\"")[3]
+    let tokens = map.split(separator: ",").compactMap { UInt64($0.trimmingCharacters(in: .whitespaces).dropFirst(2), radix: 16) }
+    let keyboardUsage = UInt64(0x3A + n - 1)  // F1 = 0x3A … F12 = 0x45
+    var i = 0
+    while i + 1 < tokens.count {
+        let src = tokens[i], dst = tokens[i + 1]
+        if src >> 16 == 0x0007, src & 0xFFFF == keyboardUsage {
+            return ((dst >> 16) << 32) | (dst & 0xFFFF)
+        }
+        i += 2
+    }
+    return nil
+}
+
+/// Переводит выбранную F-клавишу (и её медиакод) в F17 или снимает перевод.
+func applyRemap(fKey: Int?, on: Bool) {
+    var mapping = "[]"
+    if on, let n = fKey {
+        var sources = [UInt64(0x700000000) | UInt64(0x3A + n - 1)]
+        if let media = mediaUsage(forFKey: n) {
+            sources.append(media)
+        } else if n == 5 {
+            sources.append(0xC000000CF)  // Voice Command — известный код клавиши диктовки
+        }
+        mapping = "[" + sources.map {
+            String(format: "{\"HIDKeyboardModifierMappingSrc\":0x%llX,\"HIDKeyboardModifierMappingDst\":0x%llX}", $0, spareKeyUsage)
+        }.joined(separator: ",") + "]"
+    }
+    for attempt in 1...5 {
+        let (code, out) = sh("/usr/bin/hidutil", ["property", "--set", "{\"UserKeyMapping\":\(mapping)}"])
+        if code == 0 {
+            log(on && fKey != nil ? "hidutil: F\(fKey!) переведена в F17" : "hidutil: перевод клавиш снят")
+            return
+        }
+        log("hidutil, попытка \(attempt): код \(code) \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+        sleep(3)
+    }
+}
+
+func play(_ name: String) {
+    NSSound(named: NSSound.Name(name))?.play()
+}
+
+// MARK: - Печать текста
+
+let terminalBundleIDs: Set<String> = [
+    "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty",
+    "dev.warp.Warp-Stable", "io.alacritty", "net.kovidgoyal.kitty", "com.github.wez.wezterm",
+]
+
+func newlineFlags(_ config: Config) -> CGEventFlags {
+    let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+    let mode = terminalBundleIDs.contains(front) ? config.newlineInTerminals : config.newlineElsewhere
+    switch mode {
+    case "option", "alt": return .maskAlternate
+    case "shift": return .maskShift
+    default: return []
+    }
+}
+
+func postKey(_ src: CGEventSource, _ keyCode: CGKeyCode, flags: CGEventFlags) {
+    guard let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true),
+          let up = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
+    else { return }
+    down.flags = flags
+    up.flags = flags
+    down.post(tap: .cgSessionEventTap)
+    up.post(tap: .cgSessionEventTap)
+}
+
+/// Печатает текст в активное поле как ввод с клавиатуры (раскладка не важна).
+func typeText(_ text: String, config: Config) {
+    guard let src = CGEventSource(stateID: .combinedSessionState) else {
+        log("не удалось создать источник событий")
+        return
+    }
+    let newline = newlineFlags(config)
+    for ch in text {
+        if ch == "\n" {
+            postKey(src, 36, flags: newline)   // Return с модификатором — перенос без отправки
+            usleep(20000)
+            continue
+        }
+        var units = Array(String(ch).utf16)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
+        else { continue }
+        down.flags = []
+        up.flags = []
+        down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        down.post(tap: .cgSessionEventTap)
+        up.post(tap: .cgSessionEventTap)
+        usleep(2000)
+    }
+}
+
+// MARK: - Запись
+
+final class Recorder {
+    private var rec: AVAudioRecorder?
+
+    func start(to path: String) throws {
+        try? FileManager.default.removeItem(atPath: path)
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+        ]
+        let r = try AVAudioRecorder(url: URL(fileURLWithPath: path), settings: settings)
+        r.isMeteringEnabled = true
+        r.prepareToRecord()
+        guard r.record() else {
+            throw NSError(domain: "F5Voice", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "record() вернул false"])
+        }
+        rec = r
+    }
+
+    /// Останавливает запись, возвращает её длительность в секундах.
+    func stop() -> Double {
+        guard let r = rec else { return 0 }
+        let t = r.currentTime
+        r.stop()
+        rec = nil
+        return t
+    }
+
+    /// Уровень сигнала 0…1 для индикатора.
+    func level() -> Float {
+        guard let r = rec else { return 0 }
+        r.updateMeters()
+        let db = r.averagePower(forChannel: 0)          // -160…0
+        return max(0, min(1, (db + 55) / 55))
+    }
+}
+
+// MARK: - Воркер распознавания
+
+final class Worker {
+    struct Reply {
+        var text = ""
+        var error: String?
+        var reason: String?
+        var sec: Double = 0
+        var lang = ""
+        var scores = ""
+    }
+
+    var config: Config
+    var onReady: (() -> Void)?
+    private var process: Process?
+    private var stdinPipe: Pipe?
+    private var buffer = Data()
+    private(set) var isReady = false
+    private var pending: (path: String, sent: Bool, completion: (Reply) -> Void)?
+
+    init(config: Config) { self.config = config }
+
+    var isRunning: Bool { process?.isRunning ?? false }
+
+    func start() {
+        if isRunning { return }
+        isReady = false
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = ["-u", workerScript]
+        var env = ProcessInfo.processInfo.environment
+        env["F5_MODEL"] = config.model
+        env["F5_LANGS"] = config.languages
+        env["F5_ALT_MIN_PROB"] = String(config.altLanguageMinProb)
+        env["F5_PROMPT"] = config.prompt
+        env["F5_IDLE_SEC"] = String(Int(config.idleUnloadMinutes * 60))
+        env["PYTHONUNBUFFERED"] = "1"
+        p.environment = env
+        let inPipe = Pipe()
+        let outPipe = Pipe()
+        p.standardInput = inPipe
+        p.standardOutput = outPipe
+        p.standardError = FileHandle.standardError
+        outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            DispatchQueue.main.async { self?.consume(d) }
+        }
+        p.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async {
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                guard let self = self, self.process === proc else { return }
+                log("воркер завершился, код \(proc.terminationStatus)")
+                self.process = nil
+                self.stdinPipe = nil
+                self.isReady = false
+                self.buffer.removeAll()
+                if let pend = self.pending {
+                    self.pending = nil
+                    pend.completion(Reply(error: "воркер завершился, не ответив"))
+                }
+            }
+        }
+        do { try p.run() } catch {
+            log("не удалось запустить воркер: \(error)")
+            return
+        }
+        process = p
+        stdinPipe = inPipe
+        log("воркер запущен, pid \(p.processIdentifier), грузит модель \(config.model)")
+    }
+
+    /// Останавливает воркер. Если он что-то распознавал, запрос завершается ошибкой `reason`.
+    func stop(reason: String = "воркер остановлен") {
+        guard let p = process else { return }
+        process = nil
+        stdinPipe = nil
+        isReady = false
+        buffer.removeAll()
+        p.terminate()
+        if let pend = pending {
+            pending = nil
+            pend.completion(Reply(error: reason))
+        }
+    }
+
+    func transcribe(_ path: String, completion: @escaping (Reply) -> Void) {
+        if let old = pending {
+            old.completion(Reply(error: "вытеснено новым запросом"))
+        }
+        pending = (path, false, completion)
+        start()
+        flush()
+    }
+
+    private func flush() {
+        guard isReady, var pend = pending, !pend.sent, let pipe = stdinPipe else { return }
+        pend.sent = true
+        pending = pend
+        do {
+            try pipe.fileHandleForWriting.write(contentsOf: (pend.path + "\n").data(using: .utf8)!)
+        } catch {
+            log("не смог передать файл воркеру: \(error.localizedDescription)")
+            pending = nil
+            pend.completion(Reply(error: "воркер не принял запрос"))
+        }
+    }
+
+    private func consume(_ d: Data) {
+        if d.isEmpty { return }
+        buffer.append(d)
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            handle(line)
+        }
+    }
+
+    private func handle(_ line: Data) {
+        guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else {
+            log("воркер прислал не JSON: \(String(data: line, encoding: .utf8) ?? "?")")
+            return
+        }
+        if obj["ready"] as? Bool == true {
+            isReady = true
+            log("модель загружена за \(obj["load_sec"] ?? 0) с")
+            flush()
+            onReady?()
+            return
+        }
+        if obj["bye"] != nil { return }
+        var r = Reply()
+        r.text = (obj["text"] as? String) ?? ""
+        r.error = obj["error"] as? String
+        r.reason = obj["reason"] as? String
+        r.sec = (obj["sec"] as? Double) ?? 0
+        r.lang = (obj["lang"] as? String) ?? ""
+        if let fixed = obj["fixed"] as? Int, fixed > 0 { r.lang += ", исправлено сегментов: \(fixed)" }
+        if let sc = obj["scores"] as? [String: Double] {
+            r.scores = sc.keys.sorted().map { "\($0) \(String(format: "%.2f", sc[$0]!))" }.joined(separator: " / ")
+        }
+        if let pend = pending {
+            pending = nil
+            pend.completion(r)
+        }
+    }
+}
+
+// MARK: - Плашка на экране
+
+enum HUDBars { case none, live, wave }
+enum HUDAnim { case none, breathe, pulse, variableColor }
+
+/// Полоски: в режиме live бегут за микрофоном, в режиме wave — волна «думаю».
+final class BarsView: NSView {
+    var mode: HUDBars = .none { didSet { needsDisplay = true } }
+    private var history = [Float](repeating: 0, count: 10)
+    private var phase: CGFloat = 0
+    private var timer: Timer?
+
+    func start() {
+        stop()
+        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.mode == .wave { self.phase += 0.16 }
+            self.needsDisplay = true
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func reset() {
+        history = [Float](repeating: 0, count: history.count)
+        phase = 0
+    }
+
+    func push(_ level: Float) {
+        history.removeFirst()
+        history.append(level)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let n = history.count
+        let barW: CGFloat = 3
+        let gap: CGFloat = 2.5
+        let totalW = CGFloat(n) * barW + CGFloat(n - 1) * gap
+        var x = (bounds.width - totalW) / 2
+        let minH: CGFloat = 3
+        let maxH = bounds.height
+        for i in 0..<n {
+            var v: CGFloat
+            switch mode {
+            case .live: v = CGFloat(history[i])
+            case .wave: v = 0.5 + 0.5 * sin(phase - CGFloat(i) * 0.65)
+            case .none: v = 0
+            }
+            v = max(0, min(1, v))
+            let h = minH + (maxH - minH) * v
+            let rect = NSRect(x: x, y: (bounds.height - h) / 2, width: barW, height: h)
+            let alpha: CGFloat = mode == .live ? 0.35 + 0.65 * CGFloat(i + 1) / CGFloat(n) : 0.5 + 0.5 * v
+            NSColor.white.withAlphaComponent(alpha).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: barW / 2, yRadius: barW / 2).fill()
+            x += barW + gap
+        }
+    }
+}
+
+final class HUD {
+    private let panel: NSPanel
+    private let icon = NSImageView()
+    private let bars = BarsView()
+    private let label = NSTextField(labelWithString: "")
+    private var hideWork: DispatchWorkItem?
+    private let height: CGFloat = 50
+
+    init() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 50),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+
+        let bounds = panel.contentView!.bounds
+        let content = NSView(frame: bounds)
+        content.wantsLayer = true
+        content.autoresizingMask = [.width, .height]
+
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.contentTintColor = .white
+        label.textColor = .white
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.lineBreakMode = .byTruncatingTail
+        bars.isHidden = true
+        content.addSubview(icon)
+        content.addSubview(bars)
+        content.addSubview(label)
+
+        // macOS 26: Liquid Glass (класс берём динамически, чтобы собираться и на macOS 14–15).
+        // Тёмный оттенок нужен, чтобы белый текст читался и поверх светлых окон.
+        let tint = NSColor(calibratedRed: 0.09, green: 0.08, blue: 0.12, alpha: 0.55)
+        if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
+            let glass = glassClass.init(frame: bounds)
+            glass.setValue(25.0, forKey: "cornerRadius")
+            glass.setValue(tint, forKey: "tintColor")
+            glass.setValue(content, forKey: "contentView")
+            glass.autoresizingMask = [.width, .height]
+            panel.contentView = glass
+        } else {
+            let fx = NSVisualEffectView(frame: bounds)
+            fx.material = .hudWindow
+            fx.blendingMode = .behindWindow
+            fx.state = .active
+            fx.appearance = NSAppearance(named: .darkAqua)
+            fx.wantsLayer = true
+            fx.layer?.cornerRadius = 25
+            fx.layer?.masksToBounds = true
+            fx.autoresizingMask = [.width, .height]
+            fx.addSubview(content)
+            panel.contentView = fx
+        }
+    }
+
+    func show(_ text: String, symbol: String, tint: NSColor = .white, bars mode: HUDBars = .none,
+              animate: HUDAnim = .none, hideAfter: Double? = nil) {
+        hideWork?.cancel()
+        hideWork = nil
+        icon.removeAllSymbolEffects()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.contentTintColor = tint
+        switch animate {
+        case .breathe:
+            if #available(macOS 15.0, *) { icon.addSymbolEffect(.breathe) } else { icon.addSymbolEffect(.pulse) }
+        case .pulse: icon.addSymbolEffect(.pulse)
+        case .variableColor: icon.addSymbolEffect(.variableColor.iterative.reversing)
+        case .none: break
+        }
+        bars.mode = mode
+        if mode == .none {
+            bars.stop()
+            bars.isHidden = true
+        } else {
+            bars.reset()
+            bars.isHidden = false
+            bars.start()
+        }
+        setText(text)
+        panel.orderFrontRegardless()
+        if let t = hideAfter {
+            let w = DispatchWorkItem { [weak self] in self?.hide() }
+            hideWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: w)
+        }
+    }
+
+    func setText(_ text: String) {
+        label.stringValue = text
+        layout()
+    }
+
+    func push(level: Float) {
+        bars.push(level)
+    }
+
+    private func layout() {
+        label.sizeToFit()
+        let pad: CGFloat = 18
+        let iconW: CGFloat = 22
+        let barsW: CGFloat = 54
+        let gap: CGFloat = 10
+        var x = pad
+        icon.frame = NSRect(x: x, y: (height - iconW) / 2, width: iconW, height: iconW)
+        x += iconW + gap
+        if !bars.isHidden {
+            bars.frame = NSRect(x: x, y: (height - 22) / 2, width: barsW, height: 22)
+            x += barsW + gap
+        }
+        let labelW = min(label.frame.width, 620)
+        label.frame = NSRect(x: x, y: (height - label.frame.height) / 2, width: labelW, height: label.frame.height)
+        let w = x + labelW + pad + 2
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let vf = screen.visibleFrame
+        panel.setFrame(NSRect(x: vf.midX - w / 2, y: vf.minY + 48, width: w, height: height), display: true)
+    }
+
+    func hide() {
+        hideWork?.cancel()
+        hideWork = nil
+        bars.stop()
+        icon.removeAllSymbolEffects()
+        panel.orderOut(nil)
+    }
+}
+
+// MARK: - Приложение
+
+enum State { case idle, recording, transcribing }
+
+final class App: NSObject, NSApplicationDelegate {
+    static let shared = App()
+
+    var state: State = .idle
+    var tap: CFMachPort?
+    private(set) var config = Config.load()
+    private(set) var hotkey = HotKey.parse("F5")!
+    private var tapFailures = 0
+    private var statusItem: NSStatusItem!
+    private var hotkeyItem: NSMenuItem!
+    private let hud = HUD()
+    private let recorder = Recorder()
+    private lazy var worker = Worker(config: config)
+    private var accessibilityOK = false
+    private var micOK = false
+    private var meterTimer: Timer?
+    private var stopWork: DispatchWorkItem?
+    private var transcribeTimeout: DispatchWorkItem?
+    private var signalSources: [DispatchSourceSignal] = []
+    private var activity: NSObjectProtocol?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        log("F5Voice запущен, pid \(getpid()), каталог \(homeDir)")
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep, reason: "горячая клавиша диктовки")
+        applyHotkey(from: config)
+        setupStatusItem()
+        installSignalHandlers()
+        applyRemap(fKey: hotkey.fKey, on: true)
+        requestMic()
+        checkAccessibility()
+        worker.start()
+        worker.onReady = { [weak self] in
+            guard let self = self, self.state == .transcribing else { return }
+            self.showTranscribing()
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            applyRemap(fKey: self.hotkey.fKey, on: true)
+        }
+    }
+
+    private func applyHotkey(from config: Config) {
+        if let hk = HotKey.parse(config.hotkey) {
+            hotkey = hk
+            log("горячая клавиша: \(hk.title)" + (hk.fKey != nil ? " (через перевод в F17)" : ""))
+        } else {
+            hotkey = HotKey.parse("F5")!
+            log("не понял hotkey «\(config.hotkey)» в настройках — использую F5")
+        }
+    }
+
+    // MARK: Настройки
+
+    @objc private func reloadConfig() {
+        let old = config
+        let oldHotkey = hotkey
+        config = Config.load()
+        applyHotkey(from: config)
+        if oldHotkey.fKey != hotkey.fKey {
+            if oldHotkey.fKey != nil { applyRemap(fKey: nil, on: false) }
+            applyRemap(fKey: hotkey.fKey, on: true)
+        }
+        hotkeyItem.title = hotkeyTitle()
+        worker.config = config
+        if old.workerSignature != config.workerSignature {
+            log("настройки модели изменились — перезапускаю воркер")
+            worker.stop(reason: "настройки изменились")
+            worker.start()
+        }
+        hud.show("Настройки перечитаны: \(hotkey.title)", symbol: "checkmark.circle.fill", tint: .systemGreen, hideAfter: 3)
+        log("настройки перечитаны")
+    }
+
+    @objc private func openConfig() {
+        if !FileManager.default.fileExists(atPath: configPath) {
+            let example = homeDir + "/src/config.example.json"
+            try? FileManager.default.copyItem(atPath: example, toPath: configPath)
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: configPath))
+    }
+
+    // MARK: Разрешения
+
+    private func requestMic() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            micOK = true
+            log("микрофон: доступ есть")
+        case .notDetermined:
+            log("микрофон: запрашиваю доступ")
+            AVCaptureDevice.requestAccess(for: .audio) { ok in
+                DispatchQueue.main.async {
+                    self.micOK = ok
+                    log("микрофон: \(ok ? "доступ дан" : "отказано")")
+                    self.updateIcon()
+                }
+            }
+        default:
+            micOK = false
+            log("микрофон: доступа нет — Системные настройки → Конфиденциальность и безопасность → Микрофон → F5Voice")
+        }
+    }
+
+    private func checkAccessibility() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        accessibilityOK = AXIsProcessTrustedWithOptions(opts)
+        if accessibilityOK {
+            log("универсальный доступ: есть")
+            installTap()
+        } else {
+            log("универсальный доступ: нет — Системные настройки → Конфиденциальность и безопасность → Универсальный доступ → включить F5Voice")
+            hud.show("Включите F5Voice в «Универсальный доступ», чтобы \(hotkey.title) заработала",
+                     symbol: "exclamationmark.shield.fill", tint: .systemOrange, hideAfter: 12)
+        }
+        updateIcon()
+        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            if self.tap != nil { t.invalidate(); return }
+            if AXIsProcessTrusted() {
+                if !self.accessibilityOK {
+                    self.accessibilityOK = true
+                    log("универсальный доступ: дали")
+                }
+                self.installTap()
+                self.updateIcon()
+            }
+        }
+    }
+
+    private func installTap() {
+        guard tap == nil else { return }
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
+        guard let t = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
+                                        options: .defaultTap, eventsOfInterest: mask,
+                                        callback: tapCallback, userInfo: nil)
+        else {
+            tapFailures += 1
+            log("не удалось поставить перехват клавиш (попытка \(tapFailures))")
+            if tapFailures >= 3 {
+                log("перезапускаюсь, чтобы подхватить разрешение")
+                shutdown(removeRemap: false)
+                exit(1)
+            }
+            return
+        }
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, t, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        CGEvent.tapEnable(tap: t, enable: true)
+        tap = t
+        log("перехват \(hotkey.title) активен — можно диктовать")
+        hud.show("F5Voice готов: \(hotkey.title) — диктовка", symbol: "checkmark.circle.fill", tint: .systemGreen, hideAfter: 3)
+    }
+
+    // MARK: Меню в строке состояния
+
+    private func hotkeyTitle() -> String { "\(hotkey.title) — диктовка, ещё раз — готово, Esc — отмена" }
+
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let menu = NSMenu()
+        hotkeyItem = NSMenuItem(title: hotkeyTitle(), action: nil, keyEquivalent: "")
+        menu.addItem(hotkeyItem)
+        menu.addItem(NSMenuItem(title: "Начать / остановить запись", action: #selector(menuToggle), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Настройки (config.json)…", action: #selector(openConfig), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Перечитать настройки", action: #selector(reloadConfig), keyEquivalent: "r"))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Разрешение: Универсальный доступ…", action: #selector(openAccessibility), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Разрешение: Микрофон…", action: #selector(openMicrophone), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Показать лог", action: #selector(openLog), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Выключить до следующего входа (клавиша вернётся системе)", action: #selector(quit), keyEquivalent: "q"))
+        for item in menu.items { item.target = self }
+        statusItem.menu = menu
+        updateIcon()
+    }
+
+    private func updateIcon() {
+        guard let button = statusItem.button else { return }
+        var name = "mic"
+        var tint: NSColor?
+        var tip = "F5Voice: \(hotkey.title) — диктовка"
+        if !accessibilityOK || !micOK {
+            name = "mic.slash"
+            tip = "F5Voice: не хватает разрешений, смотри меню"
+        }
+        switch state {
+        case .recording:
+            name = "mic.fill"
+            tint = .systemRed
+            tip = "Запись… \(hotkey.title) — готово"
+        case .transcribing:
+            name = "waveform"
+            tint = .systemOrange
+            tip = "Распознаю…"
+        case .idle:
+            break
+        }
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: tip)
+        image?.isTemplate = true
+        button.image = image
+        button.contentTintColor = tint
+        button.toolTip = tip
+    }
+
+    @objc private func menuToggle() { toggle() }
+
+    @objc private func openAccessibility() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    @objc private func openMicrophone() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+    }
+
+    @objc private func openLog() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
+    }
+
+    /// Служба живёт под launchd с KeepAlive: обычный exit() тут же перезапустят.
+    /// Поэтому снимаем службу целиком — launchd пришлёт SIGTERM, обработчик
+    /// снимет перевод клавиши и выйдет. Если запущены вручную, через 2 с выходим сами.
+    @objc func quit() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["bootout", "gui/\(getuid())/\(launchdLabel)"]
+        try? p.run()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.terminate() }
+    }
+
+    func terminate() {
+        shutdown(removeRemap: true)
+        exit(0)
+    }
+
+    private func shutdown(removeRemap: Bool) {
+        if state == .recording { _ = recorder.stop() }
+        worker.stop()
+        if removeRemap, hotkey.fKey != nil { applyRemap(fKey: nil, on: false) }
+        log("F5Voice выключен")
+    }
+
+    private func installSignalHandlers() {
+        signal(SIGPIPE, SIG_IGN)
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { App.shared.terminate() }
+            src.resume()
+            signalSources.append(src)
+        }
+    }
+
+    // MARK: Диктовка
+
+    func toggle() {
+        switch state {
+        case .idle: startRecording()
+        case .recording: stopRecording(andTranscribe: true)
+        case .transcribing: showTranscribing()
+        }
+    }
+
+    func cancel() {
+        switch state {
+        case .recording: stopRecording(andTranscribe: false)
+        case .transcribing: cancelTranscription()
+        case .idle: break
+        }
+    }
+
+    /// Esc во время распознавания: убиваем воркер (запрос завершится «отменено»)
+    /// и сразу поднимаем новый, чтобы следующая диктовка не ждала модель.
+    private func cancelTranscription() {
+        worker.stop(reason: "отменено")
+        worker.start()
+    }
+
+    private func showTranscribing() {
+        if worker.isReady {
+            hud.show("Распознаю…   Esc — отменить", symbol: "waveform", bars: .wave, animate: .variableColor)
+        } else {
+            hud.show("Загружаю модель…   Esc — отменить", symbol: "brain",
+                     tint: NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1), bars: .wave, animate: .pulse)
+        }
+    }
+
+    private func startRecording() {
+        if !micOK, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { micOK = true }
+        guard micOK else {
+            play("Basso")
+            hud.show("Нет доступа к микрофону: Системные настройки → Конфиденциальность → Микрофон → F5Voice",
+                     symbol: "mic.slash.fill", tint: .systemOrange, hideAfter: 6)
+            return
+        }
+        do {
+            try recorder.start(to: lastWav)
+        } catch {
+            log("запись не началась: \(error.localizedDescription)")
+            play("Basso")
+            hud.show("Не удалось начать запись — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            return
+        }
+        state = .recording
+        worker.start()  // если выгрузился по простою — грузится параллельно с записью
+        play("Tink")
+        updateIcon()
+        hud.show("Говорите…   \(hotkey.title) — готово · Esc — отмена", symbol: "mic.fill", tint: .systemRed, bars: .live, animate: .breathe)
+        let meter = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.hud.push(level: self.recorder.level())
+        }
+        RunLoop.main.add(meter, forMode: .common)
+        meterTimer = meter
+        let work = DispatchWorkItem { [weak self] in self?.stopRecording(andTranscribe: true) }
+        stopWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + config.maxRecordSeconds, execute: work)
+    }
+
+    private func stopRecording(andTranscribe: Bool) {
+        guard state == .recording else { return }
+        stopWork?.cancel()
+        stopWork = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        let seconds = recorder.stop()
+        guard andTranscribe else {
+            state = .idle
+            updateIcon()
+            play("Pop")
+            hud.show("Отменено", symbol: "xmark.circle.fill", hideAfter: 1)
+            log("запись отменена")
+            return
+        }
+        state = .transcribing
+        updateIcon()
+        play("Pop")
+        showTranscribing()
+        log(String(format: "записано %.1f с, распознаю", seconds))
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self = self, self.state == .transcribing else { return }
+            log("воркер не ответил за \(Int(transcribeTimeoutSeconds)) с — перезапускаю его")
+            self.worker.stop(reason: "распознавание зависло и было прервано")
+            self.worker.start()
+        }
+        transcribeTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + transcribeTimeoutSeconds, execute: timeout)
+        worker.transcribe(lastWav) { [weak self] reply in
+            self?.handle(reply)
+        }
+    }
+
+    private func handle(_ reply: Worker.Reply) {
+        transcribeTimeout?.cancel()
+        transcribeTimeout = nil
+        state = .idle
+        updateIcon()
+        if reply.error == "отменено" {
+            log("распознавание отменено")
+            play("Pop")
+            hud.show("Отменено", symbol: "xmark.circle.fill", hideAfter: 1)
+            return
+        }
+        if let err = reply.error {
+            log("ошибка распознавания: \(err)")
+            play("Basso")
+            hud.show("Ошибка распознавания — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            return
+        }
+        if reply.text.isEmpty {
+            log("пусто (\(reply.reason ?? "модель ничего не разобрала"))")
+            play("Basso")
+            hud.show("Ничего не услышал", symbol: "mic.slash.fill", hideAfter: 2)
+            return
+        }
+        hud.hide()
+        log(String(format: "готово: %d символов, язык %@ (%@), распознавание %.2f с",
+                   reply.text.count, reply.lang, reply.scores, reply.sec))
+        let endsWithNewline = reply.text.hasSuffix("\n")
+        let text = (config.trailingSpace && !endsWithNewline) ? reply.text + " " : reply.text
+        let cfg = config
+        DispatchQueue.global(qos: .userInteractive).async { typeText(text, config: cfg) }
+    }
+}
+
+// MARK: - Перехват клавиш (вызывается на главном runloop)
+
+func tapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
+                 refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+    let app = App.shared
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let t = app.tap { CGEvent.tapEnable(tap: t, enable: true) }
+        return Unmanaged.passUnretained(event)
+    }
+    if app.hotkey.matches(event) {
+        if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+            DispatchQueue.main.async { app.toggle() }
+        }
+        return nil
+    }
+    let code = event.getIntegerValueField(.keyboardEventKeycode)
+    if code == cancelCode, app.state != .idle {
+        if type == .keyDown { DispatchQueue.main.async { app.cancel() } }
+        return nil
+    }
+    return Unmanaged.passUnretained(event)
+}
+
+// MARK: - Запуск
+
+let application = NSApplication.shared
+application.setActivationPolicy(.accessory)
+application.delegate = App.shared
+application.run()

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>F5Voice</string>
+	<key>CFBundleDisplayName</key>
+	<string>F5Voice</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.alex.f5voice</string>
+	<key>CFBundleExecutable</key>
+	<string>F5Voice</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.2</string>
+	<key>CFBundleIconFile</key>
+	<string>F5Voice</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>F5Voice записывает голос для локальной диктовки по горячей клавише. Звук никуда не отправляется.</string>
+</dict>
+</plist>

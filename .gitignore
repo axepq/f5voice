@@ -1,0 +1,10 @@
+# Локальные данные — никогда не коммитить
+*.wav
+*.log
+samples/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+F5Voice.app/
+config.json

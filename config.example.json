@@ -1,0 +1,12 @@
+{
+  "hotkey": "F5",
+  "languages": "ru,en",
+  "alt_language_min_prob": 0.95,
+  "model": "mlx-community/whisper-large-v3-turbo",
+  "prompt": "",
+  "trailing_space": true,
+  "max_record_seconds": 180,
+  "idle_unload_minutes": 15,
+  "newline_in_terminals": "option",
+  "newline_elsewhere": "shift"
+}
