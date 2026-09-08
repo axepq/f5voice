@@ -42,13 +42,23 @@ struct Config {
     var idleUnloadMinutes = 15.0
     var newlineInTerminals = "option"   // option | shift | none
     var newlineElsewhere = "shift"
+    var loadError: String?
 
     static func load() -> Config {
         var c = Config()
-        guard let data = FileManager.default.contents(atPath: configPath),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
-            log("настройки не прочитаны (\(configPath)) — работаю по умолчанию")
+        guard let data = FileManager.default.contents(atPath: configPath) else {
+            log("настроек нет (\(configPath)) — работаю по умолчанию")
+            return c
+        }
+        let obj: [String: Any]
+        do {
+            guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw NSError(domain: "F5Voice", code: 2, userInfo: [NSLocalizedDescriptionKey: "в корне должен быть объект {…}"])
+            }
+            obj = parsed
+        } catch {
+            c.loadError = error.localizedDescription
+            log("config.json не разобран: \(error.localizedDescription) — работаю по умолчанию")
             return c
         }
         if let v = obj["hotkey"] as? String, !v.isEmpty { c.hotkey = v }
@@ -107,8 +117,10 @@ struct HotKey {
             }
         }
         guard let k = key, let code = keyCodes[k] else { return nil }
+        let isFunctionKey = k.hasPrefix("f") && Int(k.dropFirst()) != nil
+        if flags.isEmpty && !isFunctionKey { return nil }  // «d» или «space» без модификаторов сломали бы набор текста
         var fKey: Int?
-        if k.hasPrefix("f"), let n = Int(k.dropFirst()), (1...12).contains(n) { fKey = n }
+        if isFunctionKey, let n = Int(k.dropFirst()), (1...12).contains(n) { fKey = n }
         let mods = [(CGEventFlags.maskControl, "⌃"), (.maskAlternate, "⌥"), (.maskShift, "⇧"), (.maskCommand, "⌘")]
             .filter { flags.contains($0.0) }.map { $0.1 }.joined()
         return HotKey(keyCode: code, flags: flags, fKey: fKey, title: mods + k.uppercased())
@@ -150,9 +162,18 @@ func sh(_ path: String, _ args: [String]) -> (Int32, String) {
     return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
 }
 
+var mediaUsageCache: [Int: UInt64?] = [:]
+
 /// Медиакод, который клавиатура Apple шлёт вместо F-клавиши в медиарежиме
 /// (из FnFunctionUsageMap драйвера), в кодировке hidutil: страница << 32 | код.
 func mediaUsage(forFKey n: Int) -> UInt64? {
+    if let cached = mediaUsageCache[n] { return cached }
+    let found = lookupMediaUsage(forFKey: n)
+    mediaUsageCache[n] = found
+    return found
+}
+
+func lookupMediaUsage(forFKey n: Int) -> UInt64? {
     let (code, out) = sh("/usr/sbin/ioreg", ["-l", "-w0"])
     guard code == 0,
           let range = out.range(of: #""FnFunctionUsageMap" = "([^"]*)""#, options: .regularExpression)
@@ -579,7 +600,11 @@ final class HUD {
         icon.contentTintColor = tint
         switch animate {
         case .breathe:
+            #if compiler(>=6.0)
             if #available(macOS 15.0, *) { icon.addSymbolEffect(.breathe) } else { icon.addSymbolEffect(.pulse) }
+            #else
+            icon.addSymbolEffect(.pulse)
+            #endif
         case .pulse: icon.addSymbolEffect(.pulse)
         case .variableColor: icon.addSymbolEffect(.variableColor.iterative.reversing)
         case .none: break
@@ -695,7 +720,8 @@ final class App: NSObject, NSApplicationDelegate {
             log("горячая клавиша: \(hk.title)" + (hk.fKey != nil ? " (через перевод в F17)" : ""))
         } else {
             hotkey = HotKey.parse("F5")!
-            log("не понял hotkey «\(config.hotkey)» в настройках — использую F5")
+            log("не понял hotkey «\(config.hotkey)» в настройках — использую F5 (нужна F1–F20 или сочетание с cmd/ctrl/alt/shift)")
+            hud.show("Не понял hotkey «\(config.hotkey)», работаю с F5", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 6)
         }
     }
 
@@ -705,10 +731,16 @@ final class App: NSObject, NSApplicationDelegate {
         let old = config
         let oldHotkey = hotkey
         config = Config.load()
+        if let err = config.loadError {
+            hud.show("config.json не разобран: \(err)", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 6)
+            play("Basso")
+            config = old
+            return
+        }
         applyHotkey(from: config)
         if oldHotkey.fKey != hotkey.fKey {
             if oldHotkey.fKey != nil { applyRemap(fKey: nil, on: false) }
-            applyRemap(fKey: hotkey.fKey, on: true)
+            if hotkey.fKey != nil { applyRemap(fKey: hotkey.fKey, on: true) }
         }
         hotkeyItem.title = hotkeyTitle()
         worker.config = config
@@ -1057,6 +1089,23 @@ func tapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
 }
 
 // MARK: - Запуск
+
+if CommandLine.arguments.contains("--check") {
+    let c = Config.load()
+    print("настройки: \(configPath)" + (c.loadError.map { " — ОШИБКА: \($0)" } ?? ""))
+    if let hk = HotKey.parse(c.hotkey) {
+        print("hotkey: \(hk.title) → keyCode \(hk.effectiveKeyCode)" + (hk.fKey != nil ? " (F\(hk.fKey!) переводится в F17, медиакод \(mediaUsage(forFKey: hk.fKey!).map { String(format: "0x%llX", $0) } ?? "не найден"))" : ""))
+    } else {
+        print("hotkey «\(c.hotkey)» НЕ РАЗОБРАН — нужна F1–F20 или сочетание с cmd/ctrl/alt/shift; будет F5")
+    }
+    print("languages: \(c.languages), alt ≥ \(c.altLanguageMinProb), model: \(c.model)")
+    print("prompt: \(c.prompt.isEmpty ? "стандартная" : c.prompt)")
+    print("trailing_space: \(c.trailingSpace), max_record_seconds: \(Int(c.maxRecordSeconds)), idle_unload_minutes: \(Int(c.idleUnloadMinutes))")
+    print("newline: терминалы — \(c.newlineInTerminals), остальные — \(c.newlineElsewhere)")
+    print("воркер: \(workerScript) — \(FileManager.default.fileExists(atPath: workerScript) ? "есть" : "НЕТ")")
+    print("python: \(python) — \(FileManager.default.isExecutableFile(atPath: python) ? "есть" : "НЕТ")")
+    exit(0)
+}
 
 let application = NSApplication.shared
 application.setActivationPolicy(.accessory)

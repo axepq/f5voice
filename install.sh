@@ -56,7 +56,7 @@ step "Python-окружение"
 MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('model') or 'mlx-community/whisper-large-v3-turbo')")"
 
 step "Модель $MODEL (первый раз около 1,5 ГБ)"
-"$HOME_DIR/venv/bin/python" - "$MODEL" <<'PY'
+"$HOME_DIR/venv/bin/python" - "$MODEL" <<'PY' || fail "не удалось скачать модель $MODEL — проверь интернет и имя модели в $HOME_DIR/config.json"
 import sys
 from huggingface_hub import snapshot_download
 snapshot_download(sys.argv[1])
@@ -66,12 +66,13 @@ step "Прогрев Python-пакетов (первый импорт компи
 "$HOME_DIR/venv/bin/python" -c "import mlx_whisper, numpy" >/dev/null 2>&1 || true
 
 step "Проверка ядра"
-"$HOME_DIR/venv/bin/python" -m common.selftest >/dev/null 2>&1 || {
-    cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest
+(cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest >/dev/null) || {
+    (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest) || fail "самопроверка ядра не прошла — см. вывод выше"
 }
 
 step "Сборка приложения"
 F5VOICE_HOME="$HOME_DIR" "$SRC/macos/build.sh"
+F5VOICE_HOME="$HOME_DIR" "$HOME_DIR/F5Voice.app/Contents/MacOS/F5Voice" --check | sed 's/^/    /'
 
 step "Служба автозапуска"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
