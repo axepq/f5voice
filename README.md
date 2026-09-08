@@ -6,22 +6,46 @@
 команды для символов и переносов.
 
 - **macOS на Apple Silicon** — основная версия: приложение в строке меню,
-  плашка Liquid Glass, mlx-whisper на GPU, установка одной командой.
-- **Windows и Linux** — версия на Python и faster-whisper, см. [other/README.md](other/README.md).
+  плашка Liquid Glass, mlx-whisper на GPU.
+- **Windows и Linux** — версия на Python и faster-whisper: значок в области
+  уведомлений, та же логика распознавания. Подробности в [other/README.md](other/README.md).
 
-## Установка на Mac
+Везде установка одной командой. Репозиторий приватный, поэтому в командах
+`gh` (GitHub CLI, залогиненный) — без него подставь `git clone
+https://github.com/axepq/f5voice.git` с логином и токеном.
 
-Нужны Command Line Tools (установщик сам предложит их поставить) и около
-2 ГБ места: модель 1,5 ГБ и Python-пакеты.
+## Установка
+
+**macOS** (Terminal):
 
 ```
 gh repo clone axepq/f5voice ~/.f5voice/src && ~/.f5voice/src/install.sh
 ```
 
-Без `gh`: `git clone https://github.com/axepq/f5voice.git ~/.f5voice/src && ~/.f5voice/src/install.sh`
-(для приватного репозитория git спросит логин и токен).
+**Linux** (X11; под Wayland см. ниже):
 
-Установщик создаёт `~/.f5voice` с Python-окружением, скачивает модель,
+```
+gh repo clone axepq/f5voice ~/.f5voice/src && ~/.f5voice/src/other/install-linux.sh
+```
+
+**Windows** (PowerShell):
+
+```
+gh repo clone axepq/f5voice "$HOME\.f5voice\src"; powershell -ExecutionPolicy Bypass -File "$HOME\.f5voice\src\other\install.ps1"
+```
+
+Каждый установщик ставит недостающее (на Windows Python и Git через winget,
+на Linux portaudio и xclip через apt/dnf/pacman), создаёт окружение в
+`~/.f5voice`, скачивает модель, проверяет ядро, включает автозапуск и
+запускает F5Voice. На Linux и Windows клавиша по умолчанию Ctrl+Alt+Space,
+удаление — `other/uninstall-linux.sh` и `other/uninstall.ps1`. На Linux под
+Wayland глобальные клавиши недоступны: установщик подскажет назначить
+сочетание рабочего стола на команду `dictate.py --toggle`.
+
+### macOS подробнее
+
+Нужны Command Line Tools (установщик сам предложит их поставить) и около
+2 ГБ места: модель 1,5 ГБ и Python-пакеты. Установщик создаёт `~/.f5voice` с Python-окружением, скачивает модель,
 собирает приложение системным `swiftc`, включает автозапуск. При первом
 запуске macOS спросит два разрешения: **Микрофон** (кнопка «Разрешить») и
 **Универсальный доступ** (Системные настройки → Конфиденциальность и
@@ -123,6 +147,7 @@ F13–F20 ловятся напрямую.
 | `macos/worker.py` | воркер mlx-whisper |
 | `common/` | общее ядро: `audio_io`, `vad`, `textproc` (команды), `segments`, `selftest` |
 | `other/dictate.py` | версия для Windows/Linux на faster-whisper |
+| `other/install-linux.sh`, `other/install.ps1` | установщики для Linux и Windows, рядом деинсталляторы |
 | `~/.f5voice/` | установленное: `F5Voice.app`, `venv`, `config.json`, `f5voice.log`, `last.wav` |
 
 Самопроверка ядра без модели: `python -m common.selftest`.

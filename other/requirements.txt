@@ -3,3 +3,5 @@ sounddevice
 pynput
 numpy
 pyperclip
+pystray
+Pillow

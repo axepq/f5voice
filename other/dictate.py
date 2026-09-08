@@ -5,18 +5,20 @@
 приоритетом русского, детектор речи, голосовые команды, чистка галлюцинаций.
 Модель — faster-whisper (CTranslate2), на CPU или CUDA.
 
-Запуск:            python other/dictate.py
+Запуск:            python other/dictate.py            (в фоне: --log, вывод в ~/.f5voice/f5voice.log)
+Переключить извне: python other/dictate.py --toggle   (для сочетаний клавиш рабочего стола, Wayland)
 Проверка на файле: python other/dictate.py --file запись.wav
 Устройства ввода:  python other/dictate.py --list-devices
 Настройки:         ~/.f5voice/config.json (создаётся при первом запуске)
 
-Не проверялось на реальных Windows/Linux — автор собирал на macOS. Если что-то
-падает, пришлите вывод консоли.
+Собрано на macOS, на настоящих Windows/Linux автором не проверялось. Если
+что-то падает — пришлите ~/.f5voice/f5voice.log.
 """
 import argparse
 import json
 import os
 import platform
+import signal
 import sys
 import threading
 import time
@@ -36,6 +38,9 @@ RATE = 16000
 HOME = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 CONFIG_PATH = HOME / "config.json"
 LAST_WAV = HOME / "last.wav"
+LOG_PATH = HOME / "f5voice.log"
+PID_PATH = HOME / "dictate.pid"
+IS_WINDOWS = platform.system() == "Windows"
 
 DEFAULTS = {
     "hotkey": "<ctrl>+<alt>+space",   # формат pynput: <ctrl>, <alt>, <shift>, <cmd>, <f5>, буквы
@@ -50,7 +55,12 @@ DEFAULTS = {
     "typing": "type",                  # type — печатать посимвольно; paste — через буфер обмена
     "newline": "shift+enter",          # shift+enter | enter | ctrl+enter
     "input_device": None,              # номер или имя из --list-devices, None — по умолчанию
+    "tray": True,                      # значок в области уведомлений (нужны pystray и Pillow)
 }
+
+
+def log(msg):
+    print(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg), flush=True)
 
 
 def load_config():
@@ -60,18 +70,18 @@ def load_config():
         try:
             cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except json.JSONDecodeError as e:
-            print(f"! config.json не разобран ({e}), работаю по умолчанию")
+            log(f"! config.json не разобран ({e}), работаю по умолчанию")
     else:
         CONFIG_PATH.write_text(json.dumps(DEFAULTS, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"создал настройки: {CONFIG_PATH}")
+        log(f"создал настройки: {CONFIG_PATH}")
     return cfg
 
 
 def beep(kind="start"):
-    if platform.system() == "Windows":
+    if IS_WINDOWS:
         try:
             import winsound
-            winsound.Beep(880 if kind == "start" else 660 if kind == "stop" else 330, 120)
+            winsound.Beep({"start": 880, "stop": 660}.get(kind, 330), 120)
             return
         except Exception:  # noqa: BLE001
             pass
@@ -88,10 +98,11 @@ class Recognizer:
         self.alt_min = float(cfg["alt_language_min_prob"])
         self.prompt = cfg["prompt"] or DEFAULT_PROMPT
         t = time.time()
-        print(f"загружаю модель {cfg['model']} ({cfg['device']}, {cfg['compute_type']})…", flush=True)
+        log(f"загружаю модель {cfg['model']} ({cfg['device']}, {cfg['compute_type']})…")
         self.model = WhisperModel(cfg["model"], device=cfg["device"], compute_type=cfg["compute_type"])
-        self.run(np.random.default_rng(0).normal(0, 1e-4, RATE).astype(np.float32), self.langs[0])  # прогрев тихим шумом, нули дают предупреждения numpy
-        print(f"модель готова за {time.time() - t:.1f} с", flush=True)
+        warm = np.random.default_rng(0).normal(0, 1e-4, RATE).astype(np.float32)  # нули дают предупреждения numpy
+        self.run(warm, self.langs[0])
+        log(f"модель готова за {time.time() - t:.1f} с")
 
     def detect(self, audio):
         _, _, all_probs = self.model.detect_language(audio=audio)
@@ -151,14 +162,12 @@ class Recorder:
         self.name = info["name"]
         self.frames = []
         self.stream = None
-        self.level = 0.0
 
     def start(self):
         self.frames = []
 
         def cb(indata, _frames, _time, status):
             self.frames.append(indata[:, 0].copy())
-            self.level = float(np.sqrt((indata[:, 0] ** 2).mean()))
 
         self.stream = self.sd.InputStream(device=self.device, samplerate=self.rate, channels=1,
                                           dtype="float32", callback=cb)
@@ -171,8 +180,7 @@ class Recorder:
             self.stream = None
         if not self.frames:
             return np.zeros(0, dtype=np.float32)
-        audio = np.concatenate(self.frames)
-        return resample(audio, self.rate, RATE)
+        return resample(np.concatenate(self.frames), self.rate, RATE)
 
 
 def save_wav(path, audio):
@@ -198,8 +206,7 @@ class Typist:
 
     def _newline(self):
         mods = {"shift": self.Key.shift, "ctrl": self.Key.ctrl, "alt": self.Key.alt}
-        parts = self.newline.lower().split("+")
-        held = [mods[p] for p in parts if p in mods]
+        held = [mods[p] for p in self.newline.lower().split("+") if p in mods]
         for m in held:
             self.kb.press(m)
         self.kb.press(self.Key.enter)
@@ -224,10 +231,63 @@ class Typist:
             if old is not None:
                 threading.Timer(0.5, lambda: pyperclip.copy(old)).start()
             return
-        for chunk in text.split("\n")[:-1]:
+        lines = text.split("\n")
+        for chunk in lines[:-1]:
             self.kb.type(chunk)
             self._newline()
-        self.kb.type(text.split("\n")[-1])
+        self.kb.type(lines[-1])
+
+
+# ---------------------------------------------------------------- значок в трее
+
+class Tray:
+    """pystray + Pillow, если установлены; иначе молча без значка."""
+
+    COLORS = {"idle": (120, 120, 130), "recording": (230, 60, 60), "transcribing": (240, 160, 40)}
+
+    def __init__(self, app):
+        import pystray
+        from PIL import Image, ImageDraw
+
+        self.pystray, self.Image, self.ImageDraw = pystray, Image, ImageDraw
+        self.app = app
+        menu = pystray.Menu(
+            pystray.MenuItem("Запись / стоп", lambda: app.toggle()),
+            pystray.MenuItem("Настройки (config.json)", lambda: open_path(CONFIG_PATH)),
+            pystray.MenuItem("Лог", lambda: open_path(LOG_PATH)),
+            pystray.MenuItem("Выход", lambda: app.quit()),
+        )
+        self.icon = pystray.Icon("F5Voice", self._image("idle"), "F5Voice", menu)
+
+    def _image(self, state):
+        img = self.Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = self.ImageDraw.Draw(img)
+        d.ellipse((6, 6, 58, 58), fill=self.COLORS[state] + (255,))
+        d.rounded_rectangle((25, 14, 39, 38), radius=7, fill=(255, 255, 255, 255))  # капсула микрофона
+        d.arc((19, 24, 45, 46), 0, 180, fill=(255, 255, 255, 255), width=3)
+        d.line((32, 46, 32, 52), fill=(255, 255, 255, 255), width=3)
+        return img
+
+    def set_state(self, state):
+        self.icon.icon = self._image(state)
+        self.icon.title = {"idle": "F5Voice", "recording": "F5Voice: запись…", "transcribing": "F5Voice: распознаю…"}[state]
+
+    def run(self, setup):
+        self.icon.run(setup=lambda icon: setup())
+
+    def stop(self):
+        self.icon.stop()
+
+
+def open_path(path):
+    import subprocess
+
+    if IS_WINDOWS:
+        os.startfile(str(path))  # noqa: S606
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 # ---------------------------------------------------------------- приложение
@@ -237,11 +297,27 @@ class App:
         self.cfg = cfg
         self.state = "idle"
         self.lock = threading.Lock()
+        self.tray = None
+        self.hotkeys = None
+        try:
+            self.recorder = Recorder(cfg["input_device"])
+        except Exception as e:  # noqa: BLE001
+            log(f"! микрофон недоступен: {type(e).__name__}: {e}")
+            log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
+                "выбрать: \"input_device\" в config.json")
+            sys.exit(1)
         self.recognizer = Recognizer(cfg)
-        self.recorder = Recorder(cfg["input_device"])
         self.typist = Typist(cfg)
         self.stop_timer = None
-        print(f"микрофон: {self.recorder.name} ({self.recorder.rate} Гц)")
+        log(f"микрофон: {self.recorder.name} ({self.recorder.rate} Гц)")
+
+    def _set_state(self, state):
+        self.state = state
+        if self.tray:
+            try:
+                self.tray.set_state(state)
+            except Exception:  # noqa: BLE001
+                pass
 
     def toggle(self):
         with self.lock:
@@ -250,7 +326,7 @@ class App:
             elif self.state == "recording":
                 self._stop()
             else:
-                print("… ещё распознаю предыдущее")
+                log("… ещё распознаю предыдущее")
 
     def cancel(self):
         with self.lock:
@@ -258,19 +334,19 @@ class App:
                 if self.stop_timer:
                     self.stop_timer.cancel()
                 self.recorder.stop()
-                self.state = "idle"
+                self._set_state("idle")
                 beep("stop")
-                print("отменено")
+                log("отменено")
 
     def _start(self):
         try:
             self.recorder.start()
         except Exception as e:  # noqa: BLE001
-            print(f"! запись не началась: {e}")
+            log(f"! запись не началась: {e}")
             return
-        self.state = "recording"
+        self._set_state("recording")
         beep("start")
-        print(f"● говорите… ({self.cfg['hotkey']} — готово, Esc — отмена)", flush=True)
+        log(f"● говорите… ({self.cfg['hotkey']} — готово, Esc — отмена)")
         self.stop_timer = threading.Timer(float(self.cfg["max_record_seconds"]), self.toggle)
         self.stop_timer.daemon = True
         self.stop_timer.start()
@@ -279,7 +355,7 @@ class App:
         if self.stop_timer:
             self.stop_timer.cancel()
         audio = self.recorder.stop()
-        self.state = "transcribing"
+        self._set_state("transcribing")
         beep("stop")
         threading.Thread(target=self._transcribe, args=(audio,), daemon=True).start()
 
@@ -288,39 +364,87 @@ class App:
             save_wav(LAST_WAV, audio)
             quiet, dur, speech = is_silence(audio)
             if quiet:
-                print(f"ничего не услышал (запись {dur} с, речи {speech} с)")
+                log(f"ничего не услышал (запись {dur} с, речи {speech} с)")
                 beep("error")
                 return
             t = time.time()
             text, lang, scores, fixed = self.recognizer.recognize(audio)
             if not text:
-                print("ничего не разобрал")
+                log("ничего не разобрал")
                 beep("error")
                 return
-            print(f"[{lang} {scores}{', исправлено ' + str(fixed) if fixed else ''}, {time.time() - t:.1f} с] {text}")
+            log(f"готово: {len(text)} символов, язык {lang} {scores}"
+                f"{', исправлено ' + str(fixed) if fixed else ''}, {time.time() - t:.1f} с")
             if self.cfg["trailing_space"] and not text.endswith("\n"):
                 text += " "
             self.typist.type(text)
         except Exception as e:  # noqa: BLE001
-            print(f"! ошибка распознавания: {type(e).__name__}: {e}")
+            log(f"! ошибка распознавания: {type(e).__name__}: {e}")
             beep("error")
         finally:
             with self.lock:
-                self.state = "idle"
+                self._set_state("idle")
 
-    def run(self):
+    def quit(self):
+        log("выход")
+        if self.hotkeys:
+            self.hotkeys.stop()
+        if self.tray:
+            self.tray.stop()
+        PID_PATH.unlink(missing_ok=True)
+        os._exit(0)
+
+    def _setup(self):
         from pynput import keyboard
 
-        hotkeys = keyboard.GlobalHotKeys({self.cfg["hotkey"]: self.toggle, "<esc>": self.cancel})
-        hotkeys.start()
-        print(f"готов: {self.cfg['hotkey']} — диктовка. Ctrl+C — выход.", flush=True)
         try:
-            while True:
-                time.sleep(1)
+            self.hotkeys = keyboard.GlobalHotKeys({self.cfg["hotkey"]: self.toggle, "<esc>": self.cancel})
+            self.hotkeys.start()
+            log(f"готов: {self.cfg['hotkey']} — диктовка, Esc — отмена, Ctrl+C — выход.")
+        except Exception as e:  # noqa: BLE001
+            log(f"! глобальная клавиша не заработала ({e}). Переключай командой: python other/dictate.py --toggle")
+        if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+            log("Wayland: глобальные клавиши через pynput не работают. Назначь в настройках рабочего стола "
+                "сочетание на команду «python other/dictate.py --toggle».")
+
+    def run(self):
+        PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+        if hasattr(signal, "SIGUSR1"):  # только из главного потока
+            signal.signal(signal.SIGUSR1, lambda *_: self.toggle())
+            signal.signal(signal.SIGUSR2, lambda *_: self.cancel())
+        if self.cfg.get("tray", True):
+            try:
+                self.tray = Tray(self)
+            except Exception as e:  # noqa: BLE001
+                log(f"без значка в трее ({type(e).__name__}: {e})")
+                self.tray = None
+        try:
+            if self.tray:
+                self.tray.run(self._setup)  # pystray занимает главный поток
+            else:
+                self._setup()
+                while True:
+                    time.sleep(1)
         except KeyboardInterrupt:
-            print("\nвыход")
+            pass
         finally:
-            hotkeys.stop()
+            self.quit()
+
+
+# ---------------------------------------------------------------- команды запуска
+
+def send_signal(name):
+    """--toggle / --cancel: сообщить работающему экземпляру."""
+    if IS_WINDOWS:
+        print("на Windows используй горячую клавишу или значок в трее")
+        return 1
+    try:
+        pid = int(PID_PATH.read_text(encoding="utf-8"))
+        os.kill(pid, getattr(signal, name))
+        return 0
+    except (FileNotFoundError, ValueError, ProcessLookupError):
+        print("F5Voice не запущен: python other/dictate.py --log &")
+        return 1
 
 
 def main():
@@ -329,7 +453,16 @@ def main():
     ap.add_argument("--list-devices", action="store_true", help="показать устройства ввода")
     ap.add_argument("--model", help="переопределить модель из настроек")
     ap.add_argument("--device", help="cpu | cuda | auto")
+    ap.add_argument("--log", action="store_true", help="писать вывод в ~/.f5voice/f5voice.log (для автозапуска)")
+    ap.add_argument("--toggle", action="store_true", help="начать/закончить запись в работающем экземпляре")
+    ap.add_argument("--cancel", action="store_true", help="отменить запись в работающем экземпляре")
+    ap.add_argument("--no-tray", action="store_true", help="без значка в области уведомлений")
     args = ap.parse_args()
+
+    if args.toggle:
+        sys.exit(send_signal("SIGUSR1"))
+    if args.cancel:
+        sys.exit(send_signal("SIGUSR2"))
 
     if args.list_devices:
         import sounddevice as sd
@@ -337,11 +470,18 @@ def main():
         print(sd.query_devices())
         return
 
+    if args.log or sys.stdout is None or sys.stderr is None:  # pythonw без консоли
+        HOME.mkdir(parents=True, exist_ok=True)
+        f = open(LOG_PATH, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        sys.stdout = sys.stderr = f
+
     cfg = load_config()
     if args.model:
         cfg["model"] = args.model
     if args.device:
         cfg["device"] = args.device
+    if args.no_tray:
+        cfg["tray"] = False
 
     if args.file:
         rec = Recognizer(cfg)
