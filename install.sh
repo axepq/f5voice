@@ -62,6 +62,9 @@ from huggingface_hub import snapshot_download
 snapshot_download(sys.argv[1])
 PY
 
+step "Прогрев Python-пакетов (первый импорт компилирует их, иначе первый запуск ждёт полминуты)"
+"$HOME_DIR/venv/bin/python" -c "import mlx_whisper, numpy" >/dev/null 2>&1 || true
+
 step "Проверка ядра"
 "$HOME_DIR/venv/bin/python" -m common.selftest >/dev/null 2>&1 || {
     cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest
