@@ -35,5 +35,52 @@ class StartupAction(unittest.TestCase):
         self.assertEqual(self.action(False, toggle=True), ("send", "toggle"))  # ответа не будет → «не запущен»
 
 
+
+
+class HoldGate(unittest.TestCase):
+    """Нажал-отпустил — переключение; держишь дольше порога — запись до отпускания."""
+
+    def test_short_tap_toggles(self):
+        g = dictate.HoldGate(hold_after=0.35)
+        self.assertEqual(g.press(recording=False, now=0.0), "start")
+        self.assertEqual(g.release(recording=True, now=0.1), "none")     # короткое нажатие: запись идёт
+        self.assertEqual(g.press(recording=True, now=2.0), "stop")       # второе нажатие — стоп
+        self.assertEqual(g.release(recording=False, now=2.1), "none")
+
+    def test_hold_records_until_release(self):
+        g = dictate.HoldGate(hold_after=0.35)
+        self.assertEqual(g.press(recording=False, now=0.0), "start")
+        self.assertEqual(g.release(recording=True, now=0.8), "stop")     # держал — отпустил — распознаём
+
+    def test_autorepeat_while_held_is_ignored(self):
+        g = dictate.HoldGate(hold_after=0.35)
+        self.assertEqual(g.press(recording=False, now=0.0), "start")
+        self.assertEqual(g.press(recording=True, now=0.5), "none")       # автоповтор клавиши
+        self.assertEqual(g.release(recording=True, now=0.9), "stop")
+
+    def test_release_after_stop_by_second_tap_does_nothing(self):
+        g = dictate.HoldGate(hold_after=0.35)
+        g.press(recording=False, now=0.0)
+        g.release(recording=True, now=0.1)
+        self.assertEqual(g.press(recording=True, now=5.0), "stop")
+        self.assertEqual(g.release(recording=False, now=5.9), "none")    # долго держал второе нажатие — ничего
+
+
+class RecordModes(unittest.TestCase):
+    def test_toggle_mode_ignores_long_hold(self):
+        g = dictate.HoldGate(mode="toggle", hold_after=0.35)
+        self.assertEqual(g.press(recording=False, now=0.0), "start")
+        self.assertEqual(g.release(recording=True, now=3.0), "none")     # держал долго — запись продолжается
+        self.assertEqual(g.press(recording=True, now=4.0), "stop")
+
+    def test_hold_mode_stops_on_any_release(self):
+        g = dictate.HoldGate(mode="hold", hold_after=0.35)
+        self.assertEqual(g.press(recording=False, now=0.0), "start")
+        self.assertEqual(g.release(recording=True, now=0.1), "stop")     # даже короткое нажатие — отпустил, стоп
+
+    def test_auto_is_default(self):
+        self.assertEqual(dictate.HoldGate().mode, "auto")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

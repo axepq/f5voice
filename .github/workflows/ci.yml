@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    # Ядро и версия для Windows/Linux: самопроверка, тесты, статика — на обеих системах.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pyflakes
+      - run: python -m pyflakes common python macos/worker.py
+      - run: python -m common.selftest
+      - run: python python/test_control.py
+      - run: python python/test_dictate.py
+      - run: python python/test_history.py
+
+  macos:
+    # Приложение для macOS собирается системным swiftc, как у пользователя.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: F5VOICE_HOME="$RUNNER_TEMP/f5voice" F5VOICE_APP="$RUNNER_TEMP/f5voice/F5Voice.app" zsh macos/build.sh
+      - name: check
+        run: F5VOICE_HOME="$RUNNER_TEMP/f5voice" "$RUNNER_TEMP/f5voice/F5Voice.app/Contents/MacOS/F5Voice" --check
+
+  installers:
+    # Установщики: синтаксис bash, shellcheck, разбор PowerShell и только ASCII в .ps1
+    # (не-ASCII в .ps1 без BOM ломает вывод в старых консолях).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install-macos.sh install-linux.sh uninstall-macos.sh uninstall-linux.sh
+      - run: shellcheck -S warning -e SC2016,SC1090,SC2059 install-macos.sh install-linux.sh uninstall-macos.sh uninstall-linux.sh
+      - run: zsh -n macos/build.sh macos/make-icon.sh
+      - name: powershell parses
+        shell: pwsh
+        run: |
+          foreach ($f in "install-windows.ps1", "uninstall-windows.ps1") {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Host $_ }; throw "parse errors in $f" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $f))
+            if ($bytes | Where-Object { $_ -gt 127 }) { throw "$f contains non-ASCII bytes" }
+          }

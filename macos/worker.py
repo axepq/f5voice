@@ -23,6 +23,7 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
 import glob
 import json
 import os
+from pathlib import Path
 import select
 import sys
 import time
@@ -36,6 +37,9 @@ from common.audio_io import load_audio  # noqa: E402
 from common.segments import assemble  # noqa: E402
 from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
 from common.vad import is_silence  # noqa: E402
+from common import history  # noqa: E402
+
+HOME_DIR = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 
 MODEL = os.environ.get("F5_MODEL") or "mlx-community/whisper-large-v3-turbo"
 LANGS = tuple(x.strip() for x in (os.environ.get("F5_LANGS") or "ru,en").split(",") if x.strip()) or ("ru",)
@@ -153,6 +157,7 @@ def main():
                 out({"text": "", "reason": "silence", "dur": dur, "speech": speech})
                 continue
             text, lang, scores, fixed = recognize(audio)
+            history.add(HOME_DIR / "history.json", text, lang, time.time() - t1)
             out({"text": text, "lang": lang, "scores": scores, "fixed": fixed,
                  "dur": dur, "speech": speech, "sec": round(time.time() - t1, 2)})
         except Exception as e:  # noqa: BLE001

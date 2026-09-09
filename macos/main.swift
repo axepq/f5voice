@@ -51,6 +51,7 @@ struct Config {
     var newlineInTerminals = "option"   // option | shift | none
     var newlineElsewhere = "shift"
     var style = "glass"                 // glass | metal | clear | dark
+    var recordMode = "auto"             // auto — нажатие или удержание | toggle — только нажатие | hold — только удержание
     var loadError: String?
 
     /// Дописывает ключи в config.json, остальное сохраняя как есть.
@@ -94,6 +95,7 @@ struct Config {
         if let v = obj["newline_in_terminals"] as? String { c.newlineInTerminals = v }
         if let v = obj["newline_elsewhere"] as? String { c.newlineElsewhere = v }
         if let v = obj["style"] as? String, !v.isEmpty { c.style = v }
+        if let v = obj["record_mode"] as? String, ["auto", "toggle", "hold"].contains(v) { c.recordMode = v }
         return c
     }
 
@@ -863,6 +865,33 @@ final class HUD {
 
 enum State { case idle, recording, transcribing }
 
+/// Режимы записи: auto — нажал и отпустил → переключение, держишь дольше holdAfter → запись до
+/// отпускания; toggle — только переключение нажатием; hold — запись только пока держишь.
+struct HoldGate {
+    enum Action { case start, stop, none }
+    var mode = "auto"
+    var holdAfter: TimeInterval = 0.35
+    private var pressedAt: TimeInterval?
+    private var started = false
+    var isHeld: Bool { pressedAt != nil }
+
+    mutating func press(recording: Bool, now: TimeInterval = CACurrentMediaTime()) -> Action {
+        if pressedAt != nil { return .none }   // автоповтор зажатой клавиши
+        pressedAt = now
+        started = !recording
+        return recording ? .stop : .start
+    }
+
+    mutating func release(recording: Bool, now: TimeInterval = CACurrentMediaTime()) -> Action {
+        let longHold = pressedAt.map { now - $0 >= holdAfter } ?? false
+        let wasStarted = started
+        pressedAt = nil
+        started = false
+        if !(wasStarted && recording) || mode == "toggle" { return .none }
+        return (mode == "hold" || longHold) ? .stop : .none
+    }
+}
+
 final class App: NSObject, NSApplicationDelegate {
     static let shared = App()
 
@@ -875,6 +904,9 @@ final class App: NSObject, NSApplicationDelegate {
     private var hotkeyItem: NSMenuItem!
     private lazy var hud = HUD(style: config.style)
     private var settings: SettingsWindow?
+    private var gate = HoldGate()
+    private var holdHint: DispatchWorkItem?
+    var hotkeyHeld: Bool { gate.isHeld }
     var capturing = false
     private let recorder = Recorder()
     private lazy var worker = Worker(config: config)
@@ -891,6 +923,7 @@ final class App: NSObject, NSApplicationDelegate {
         activity = ProcessInfo.processInfo.beginActivity(
             options: .userInitiatedAllowingIdleSystemSleep, reason: "горячая клавиша диктовки")
         applyHotkey(from: config)
+        gate.mode = config.recordMode
         setupStatusItem()
         installSignalHandlers()
         applyRemap(fKey: hotkey.fKey, on: true)
@@ -971,6 +1004,7 @@ final class App: NSObject, NSApplicationDelegate {
             if hotkey.fKey != nil { applyRemap(fKey: hotkey.fKey, on: true) }
         }
         hotkeyItem.title = hotkeyTitle()
+        gate.mode = config.recordMode
         if old.style != config.style {
             hud.hide()
             hud = HUD(style: config.style)
@@ -1205,6 +1239,31 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Горячая клавиша нажата (без автоповтора). Время берём из события: старт записи задерживает
+    /// главный поток, и «сейчас» при обработке отпускания было бы позже настоящего.
+    func hotkeyPressed(at time: TimeInterval) {
+        if state == .transcribing { showTranscribing(); return }
+        switch gate.press(recording: state == .recording, now: time) {
+        case .start:
+            startRecording()
+            if gate.mode != "toggle" {
+                let hint = DispatchWorkItem { [weak self] in
+                    guard let self = self, self.gate.isHeld, self.state == .recording else { return }
+                    self.hud.setText("Говорите…   отпустите — готово · Esc — отмена")
+                }
+                holdHint = hint
+                DispatchQueue.main.asyncAfter(deadline: .now() + gate.holdAfter, execute: hint)
+            }
+        case .stop: stopRecording(andTranscribe: true)
+        case .none: break
+        }
+    }
+
+    func hotkeyReleased(at time: TimeInterval) {
+        holdHint?.cancel()
+        if gate.release(recording: state == .recording, now: time) == .stop { stopRecording(andTranscribe: true) }
+    }
+
     func cancel() {
         switch state {
         case .recording: stopRecording(andTranscribe: false)
@@ -1345,13 +1404,21 @@ func tapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
         }
         return nil
     }
+    let when = Double(event.timestamp) / 1_000_000_000   // секунды с загрузки, та же шкала, что CACurrentMediaTime
     if app.hotkey.matches(event) {
         if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-            DispatchQueue.main.async { app.toggle() }
+            DispatchQueue.main.async { app.hotkeyPressed(at: when) }
+        } else if type == .keyUp {
+            DispatchQueue.main.async { app.hotkeyReleased(at: when) }
         }
         return nil
     }
     let code = event.getIntegerValueField(.keyboardEventKeycode)
+    if type == .keyUp, code == Int64(app.hotkey.effectiveKeyCode), app.hotkeyHeld {
+        // модификатор отпустили раньше клавиши — отпускание всё равно наше
+        DispatchQueue.main.async { app.hotkeyReleased(at: when) }
+        return nil
+    }
     if code == cancelCode, app.state != .idle {
         if type == .keyDown { DispatchQueue.main.async { app.cancel() } }
         return nil

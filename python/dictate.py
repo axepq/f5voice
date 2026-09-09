@@ -51,6 +51,7 @@ from common.audio_io import load_audio, resample  # noqa: E402
 from common.segments import assemble  # noqa: E402
 from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
 from common.vad import is_silence  # noqa: E402
+from common import history  # noqa: E402
 
 import control  # noqa: E402  (python/control.py: единственный экземпляр, --toggle, окно по ярлыку)
 
@@ -66,6 +67,7 @@ IS_WINDOWS = platform.system() == "Windows"
 
 DEFAULTS = {
     "hotkey": "<ctrl>+<alt>+<space>",   # можно и «ctrl+alt+space» или «F5»: имена приводятся к формату pynput
+    "record_mode": "auto",             # auto — нажатие или удержание; toggle — только нажатие; hold — только удержание
     "languages": "ru,en",
     "alt_language_min_prob": 0.95,
     "model": "large-v3-turbo",         # small / medium быстрее на слабом CPU
@@ -305,6 +307,40 @@ _KEY_ALIASES = {"control": "ctrl", "option": "alt", "opt": "alt", "win": "cmd", 
                 "super": "cmd", "command": "cmd", "escape": "esc", "return": "enter", "spacebar": "space"}
 
 
+RECORD_MODES = {"auto": "нажатие или удержание", "toggle": "только нажатие", "hold": "только удержание"}
+
+
+class HoldGate:
+    """Режимы записи: auto — нажал и отпустил → переключение, держишь дольше hold_after → запись до
+    отпускания; toggle — только переключение нажатием; hold — запись только пока держишь.
+    press/release возвращают "start" | "stop" | "none"."""
+
+    def __init__(self, mode="auto", hold_after=0.35):
+        self.mode = mode if mode in RECORD_MODES else "auto"
+        self.hold_after = hold_after
+        self.pressed_at = None
+        self.started = False
+
+    @property
+    def held(self):
+        return self.pressed_at is not None
+
+    def press(self, recording, now=None):
+        if self.pressed_at is not None:      # автоповтор зажатой клавиши
+            return "none"
+        self.pressed_at = time.monotonic() if now is None else now
+        self.started = not recording
+        return "start" if not recording else "stop"
+
+    def release(self, recording, now=None):
+        now = time.monotonic() if now is None else now
+        long_hold = self.pressed_at is not None and now - self.pressed_at >= self.hold_after
+        started, self.pressed_at, self.started = self.started, None, False
+        if not (started and recording) or self.mode == "toggle":
+            return "none"
+        return "stop" if self.mode == "hold" or long_hold else "none"
+
+
 def normalize_hotkey(spec):
     """«ctrl+alt+space», «<ctrl>+<alt>+space», «F5» → формат pynput: <ctrl>+<alt>+<space>, <f5>.
 
@@ -353,12 +389,19 @@ def win_hotkey_spec(normalized):
 class WinHotkey(threading.Thread):
     """Глобальное сочетание через RegisterHotKey — родной способ Windows, надёжнее хуков pynput."""
 
-    def __init__(self, mods, vk, on_press):
+    def __init__(self, mods, vk, on_press, on_release=None):
         super().__init__(daemon=True)
-        self.mods, self.vk, self.on_press = mods, vk, on_press
+        self.mods, self.vk, self.on_press, self.on_release = mods, vk, on_press, on_release
         self.ready = threading.Event()
         self.ok = False
         self.error = ""
+
+    def _watch_release(self):
+        """WM_HOTKEY приходит только на нажатие; отпускание основной клавиши ловим опросом."""
+        user32 = ctypes.windll.user32
+        while user32.GetAsyncKeyState(self.vk) & 0x8000:
+            time.sleep(0.02)
+        self.on_release()
 
     def run(self):
         import ctypes.wintypes
@@ -375,6 +418,8 @@ class WinHotkey(threading.Thread):
             if msg.message == 0x0312:  # WM_HOTKEY
                 try:
                     self.on_press()
+                    if self.on_release:  # WM_HOTKEY приходит только на нажатие — отпускание ловим опросом
+                        threading.Thread(target=self._watch_release, daemon=True).start()
                 except Exception as e:  # noqa: BLE001
                     log(f"! обработчик клавиши: {e}")
             user32.TranslateMessage(ctypes.byref(msg))
@@ -857,7 +902,8 @@ class HUD(threading.Thread):
         status.grid(row=1, column=1, sticky="w")
 
         cfg = dict(app.cfg)
-        rows = [("Сочетание клавиш", "hotkey", None), ("Стиль плашки", "style", list(self.STYLES)),
+        rows = [("Сочетание клавиш", "hotkey", None), ("Запись", "record_mode", list(RECORD_MODES.values())),
+                ("Стиль плашки", "style", list(self.STYLES)),
                 ("Языки (первый — основной)", "languages", None),
                 ("Модель", "model", ["large-v3-turbo", "medium", "small"]),
                 ("Перенос строки клавишей", "newline", ["shift+enter", "enter", "ctrl+enter"])]
@@ -865,6 +911,8 @@ class HUD(threading.Thread):
         for i, (label, key, options) in enumerate(rows, start=1):
             ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=4, padx=(0, 12))
             value = pretty_hotkey(normalize_hotkey(cfg.get(key) or "")) if key == "hotkey" else str(cfg.get(key, ""))
+            if key == "record_mode":
+                value = RECORD_MODES.get(cfg.get(key) or "auto", RECORD_MODES["auto"])
             v = tk.StringVar(value=value)
             vars_[key] = v
             if options:
@@ -911,6 +959,7 @@ class HUD(threading.Thread):
         def save():
             for key, v in vars_.items():
                 cfg[key] = v.get().strip()
+            cfg["record_mode"] = next((k for k, v in RECORD_MODES.items() if v == cfg["record_mode"]), "auto")
             cfg["trailing_space"] = bool(trailing.get())
             if cfg.get("model") != app.cfg.get("model"):
                 cfg.pop("backend_checked", None)
@@ -922,10 +971,28 @@ class HUD(threading.Thread):
             win.destroy()
             app.restart()
 
+        ttk.Label(frame, text="Последние диктовки", font=("Segoe UI", 10, "bold")).grid(
+            row=row + 3, column=0, columnspan=3, sticky="w", pady=(12, 2))
+        items = history.load(HOME / "history.json")
+        box = tk.Listbox(frame, height=5, width=72, activestyle="none")
+        for it in items:
+            box.insert("end", f"{it['time'][11:16]}  {it['text'].replace(chr(10), ' ')[:90]}")
+        box.grid(row=row + 4, column=0, columnspan=3, sticky="ew")
+
+        def copy_selected(_event=None):
+            sel = box.curselection()
+            if sel:
+                win.clipboard_clear()
+                win.clipboard_append(items[sel[0]]["text"])
+                hint.configure(text="Скопировано в буфер обмена")
+
+        box.bind("<Double-Button-1>", copy_selected)
+
         bar = ttk.Frame(frame)
-        bar.grid(row=row + 3, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        bar.grid(row=row + 5, column=0, columnspan=3, sticky="ew", pady=(14, 0))
         ttk.Button(bar, text="Проверить: запись", command=app.toggle).pack(side="left")
-        ttk.Button(bar, text="Лог", command=lambda: open_path(LOG_PATH)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Скопировать выбранное", command=copy_selected).pack(side="left", padx=6)
+        ttk.Button(bar, text="Лог", command=lambda: open_path(LOG_PATH)).pack(side="left")
         ttk.Button(bar, text="Сохранить и перезапустить", command=save).pack(side="right")
         ttk.Button(bar, text="Закрыть", command=win.destroy).pack(side="right", padx=6)
 
@@ -1075,6 +1142,9 @@ class App:
             sys.exit(1)
         self.hud = HUD(self, lambda: self.recorder.level, cfg.get("style", "glass")) if cfg.get("hud", True) else None
         self.hotkey_title = pretty_hotkey(normalize_hotkey(cfg["hotkey"]))
+        self.gate = HoldGate(cfg.get("record_mode", "auto"))
+        self.hold_hint = None
+        self.release_listener = None
         self.recognizer = Recognizer(cfg)
         self.typist = Typist(cfg)
         self.stop_timer = None
@@ -1126,6 +1196,26 @@ class App:
                 self._stop()
             else:  # idle или ещё распознаём предыдущее — новую запись можно начинать сразу
                 self._start()
+
+    def on_hotkey_press(self):
+        action = self.gate.press(self.state == "recording")
+        if action == "none":
+            return
+        self.toggle()
+        if action == "start" and self.gate.mode != "toggle":
+            self.hold_hint = threading.Timer(self.gate.hold_after, self._hold_hint)
+            self.hold_hint.daemon = True
+            self.hold_hint.start()
+
+    def _hold_hint(self):
+        if self.gate.held and self.state == "recording":
+            self._show("recording", "Говорите…   отпустите — готово · Esc — отмена")
+
+    def on_hotkey_release(self):
+        if self.hold_hint:
+            self.hold_hint.cancel()
+        if self.gate.release(self.state == "recording") == "stop":
+            self.toggle()
 
     def cancel(self):
         with self.lock:
@@ -1179,6 +1269,7 @@ class App:
                 return
             log(f"готово: {len(text)} символов, язык {lang} {scores}"
                 f"{', исправлено ' + str(fixed) if fixed else ''}, {time.time() - t:.1f} с")
+            history.add(HOME / "history.json", text, lang, time.time() - t)
             if self.cfg["trailing_space"] and not text.endswith("\n"):
                 text += " "
             self._show("ok", f"Напечатано {len(text.strip())} символов", 1.5)
@@ -1220,7 +1311,7 @@ class App:
         if IS_WINDOWS:
             spec = win_hotkey_spec(hotkey)
             if spec:
-                wh = WinHotkey(spec[0], spec[1], self.toggle)
+                wh = WinHotkey(spec[0], spec[1], self.on_hotkey_press, self.on_hotkey_release)
                 wh.start()
                 wh.ready.wait(3)
                 if wh.ok:
@@ -1237,14 +1328,25 @@ class App:
                 log(f"Esc для отмены недоступен ({e})")
         if not registered:
             try:
-                keys = {hotkey: self.toggle}
+                keys = {hotkey: self.on_hotkey_press}
                 if "<alt>" in hotkey:  # правый Alt на Windows/Linux приходит как alt_gr
-                    keys[hotkey.replace("<alt>", "<alt_gr>")] = self.toggle
+                    keys[hotkey.replace("<alt>", "<alt_gr>")] = self.on_hotkey_press
                 if not IS_WINDOWS:
                     keys["<esc>"] = self.cancel
                 self.hotkeys = keyboard.GlobalHotKeys(keys)
                 self.hotkeys.start()
                 registered = "pynput"
+                name = hotkey.split("+")[-1].strip("<>")   # отпускание основной клавиши — режим «удерживать»
+                target = keyboard.KeyCode.from_char(name) if len(name) == 1 else getattr(keyboard.Key, name, None)
+                if target is not None:
+                    def on_release(k, target=target):
+                        same = k == target or (getattr(k, "char", None) and getattr(target, "char", None)
+                                               and k.char.lower() == target.char)
+                        if same:
+                            self.on_hotkey_release()
+                    self.release_listener = keyboard.Listener(on_release=on_release)
+                    self.release_listener.daemon = True
+                    self.release_listener.start()
             except Exception as e:  # noqa: BLE001
                 log(f"[READY] глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
                 return

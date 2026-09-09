@@ -1,5 +1,6 @@
 {
   "hotkey": "F5",
+  "record_mode": "auto",
   "languages": "ru,en",
   "alt_language_min_prob": 0.95,
   "model": "mlx-community/whisper-large-v3-turbo",

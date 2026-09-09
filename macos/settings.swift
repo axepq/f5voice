@@ -9,6 +9,7 @@ import Cocoa
 let hotkeyPresets = ["F5", "F6", "F13", "F19", "cmd+shift+space", "ctrl+alt+space", "ctrl+alt+d"]
 let styleNames = [("glass", "Liquid Glass"), ("metal", "Liquid Metal"), ("clear", "Прозрачное стекло"), ("dark", "Тёмная")]
 let newlineNames = [("option", "⌥⏎  Option + Return"), ("shift", "⇧⏎  Shift + Return"), ("none", "⏎  Return")]
+let recordModeNames = [("auto", "Нажатие или удержание"), ("toggle", "Только нажатие"), ("hold", "Только удержание")]
 let launchAgentPlist = NSHomeDirectory() + "/Library/LaunchAgents/\(launchdLabel).plist"
 
 /// Служба выключена через launchctl disable: при входе в систему не запустится.
@@ -18,11 +19,15 @@ func launchAgentDisabled() -> Bool {
     return out.contains("\"\(launchdLabel)\" => disabled") || out.contains("\"\(launchdLabel)\" => true")
 }
 
-final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource {
     private let window: NSWindow
     private unowned let app: App
     private let status = NSTextField(wrappingLabelWithString: "")
     private let hotkeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let recordPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let historyTable = NSTableView()
+    private var historyItems: [(time: String, text: String)] = []
+    private var historyStamp: Date?
     private let stylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let languagesField = NSTextField(string: "")
     private let modelField = NSTextField(string: "")
@@ -120,6 +125,13 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let hotkeyRow = NSStackView(views: [hotkeyPopup, capture])
         hotkeyRow.spacing = 8
 
+        for (name, text) in recordModeNames {
+            recordPopup.addItem(withTitle: text)
+            recordPopup.lastItem?.representedObject = name
+        }
+        recordPopup.target = self
+        recordPopup.action = #selector(recordModeChanged)
+        recordPopup.toolTip = "Нажатие: первое — запись, второе — готово. Удержание: запись, пока держишь клавишу"
         for (name, text) in styleNames {
             stylePopup.addItem(withTitle: text)
             stylePopup.lastItem?.representedObject = name
@@ -149,7 +161,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             popup.target = self
             popup.action = #selector(newlineChanged(_:))
         }
-        for popup in [hotkeyPopup, stylePopup, termPopup, otherPopup] {
+        for popup in [hotkeyPopup, recordPopup, stylePopup, termPopup, otherPopup] {
             popup.widthAnchor.constraint(equalToConstant: 210).isActive = true
         }
         trailingBox.target = self
@@ -159,6 +171,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
         let form = NSGridView(views: [
             [label("Сочетание клавиш"), hotkeyRow],
+            [label("Запись"), recordPopup],
             [label("Стиль плашки"), styleRow],
             [label("Языки"), languagesField],
             [label("Модель"), modelField],
@@ -184,6 +197,27 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         perms.column(at: 0).xPlacement = .trailing
         perms.column(at: 1).width = 190
 
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
+        historyTable.addTableColumn(column)
+        historyTable.headerView = nil
+        historyTable.rowHeight = 20
+        historyTable.usesAlternatingRowBackgroundColors = true
+        historyTable.dataSource = self
+        historyTable.target = self
+        historyTable.doubleAction = #selector(copyHistory)
+        let scroll = NSScrollView()
+        scroll.documentView = historyTable
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.widthAnchor.constraint(equalToConstant: 512).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 104).isActive = true
+        let copyButton = NSButton(title: "Скопировать выбранное", target: self, action: #selector(copyHistory))
+        let historyHint = NSTextField(labelWithString: "Последние 30 диктовок; двойной щелчок тоже копирует")
+        historyHint.font = .systemFont(ofSize: 11)
+        historyHint.textColor = .tertiaryLabelColor
+        let historyBar = NSStackView(views: [copyButton, historyHint])
+        historyBar.spacing = 10
+
         let test = NSButton(title: "Проверить: начать запись", target: self, action: #selector(testRecording))
         let logButton = NSButton(title: "Показать лог", target: self, action: #selector(openLog))
         let cfgButton = NSButton(title: "config.json", target: self, action: #selector(openConfigFile))
@@ -196,7 +230,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         hint.textColor = .tertiaryLabelColor
         hint.preferredMaxLayoutWidth = 512
 
-        let root = NSStackView(views: [header, separator(), form, separator(), section("Разрешения"), perms, separator(), bar, hint])
+        let root = NSStackView(views: [header, separator(), form, separator(), section("Последние диктовки"), scroll, historyBar,
+                                       separator(), section("Разрешения"), perms, separator(), bar, hint])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 14
@@ -215,7 +250,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         hotkeyPopup.removeAllItems()
         for spec in hotkeySpecs { hotkeyPopup.addItem(withTitle: HotKey.parse(spec)?.title ?? spec) }
         hotkeyPopup.selectItem(at: hotkeySpecs.firstIndex { $0.lowercased() == c.hotkey.lowercased() } ?? 0)
+        recordPopup.selectItem(at: recordModeNames.firstIndex { $0.0 == c.recordMode } ?? 0)
         stylePopup.selectItem(at: styleNames.firstIndex { $0.0 == c.style } ?? 0)
+        loadHistory(force: true)
         if languagesField.currentEditor() == nil { languagesField.stringValue = c.languages }
         if modelField.currentEditor() == nil { modelField.stringValue = c.model }
         termPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineInTerminals } ?? 0)
@@ -236,6 +273,44 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         axLabel.stringValue = axOK ? "✓ разрешён" : "✗ нет — клавиша не работает"
         axLabel.textColor = axOK ? .systemGreen : .systemOrange
         status.stringValue = app.statusText()
+        loadHistory(force: false)
+    }
+
+    // MARK: История
+
+    private func loadHistory(force: Bool) {
+        let path = homeDir + "/history.json"
+        let stamp = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        if !force, stamp == historyStamp { return }
+        historyStamp = stamp
+        var items: [(time: String, text: String)] = []
+        if let data = FileManager.default.contents(atPath: path),
+           let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
+            for entry in list.reversed() {
+                guard let text = entry["text"] as? String, !text.isEmpty else { continue }
+                items.append((time: entry["time"] as? String ?? "", text: text))
+            }
+        }
+        historyItems = items
+        historyTable.reloadData()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { historyItems.count }
+
+    func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+        guard row < historyItems.count else { return nil }
+        let item = historyItems[row]
+        let clock = item.time.count >= 16 ? String(item.time.dropFirst(11).prefix(5)) : ""
+        let oneLine = item.text.replacingOccurrences(of: "\n", with: " ")
+        return "\(clock)   \(oneLine.prefix(90))"
+    }
+
+    @objc private func copyHistory() {
+        let row = historyTable.selectedRow
+        guard row >= 0, row < historyItems.count else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(historyItems[row].text, forType: .string)
+        status.stringValue = "Скопировано в буфер обмена"
     }
 
     // MARK: Действия
@@ -247,6 +322,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     @objc private func captureHotkey() { app.captureHotkey() }
+
+    @objc private func recordModeChanged() {
+        guard !updating, let name = recordPopup.selectedItem?.representedObject as? String else { return }
+        app.apply(["record_mode": name])
+    }
 
     @objc private func styleChanged() {
         guard !updating, let name = stylePopup.selectedItem?.representedObject as? String else { return }

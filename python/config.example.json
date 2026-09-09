@@ -1,5 +1,6 @@
 {
   "hotkey": "<ctrl>+<alt>+<space>",
+  "record_mode": "auto",
   "languages": "ru,en",
   "alt_language_min_prob": 0.95,
   "model": "large-v3-turbo",
