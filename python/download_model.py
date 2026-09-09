@@ -11,7 +11,18 @@ faster_whisper.utils.download_model нарочно глушит tqdm, и заг�
 import os
 import sys
 
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows без режима разработчика: копии вместо ссылок, это нормально
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+def _utf8_console():
+    """Консоль Windows по умолчанию cp1252/cp866: без этого print кириллицы и стрелок падает."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_utf8_console()  # Windows без режима разработчика: копии вместо ссылок, это нормально
 
 from faster_whisper.utils import _MODELS  # noqa: E402
 from huggingface_hub import snapshot_download  # noqa: E402

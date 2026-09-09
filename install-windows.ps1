@@ -7,6 +7,7 @@
 # ASCII only on purpose: Windows PowerShell 5.1 misreads UTF-8 without BOM, and a BOM breaks irm | iex.
 # Never calls `exit` when piped through iex: that would close the whole PowerShell window.
 $ErrorActionPreference = "Stop"
+$env:PYTHONUTF8 = "1"          # Python prints Cyrillic/arrows even on cp1252 consoles
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 $IsFileMode = [bool]$MyInvocation.MyCommand.Path

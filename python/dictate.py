@@ -26,6 +26,17 @@ from pathlib import Path
 
 import numpy as np
 
+def _utf8_console():
+    """Консоль Windows по умолчанию cp1252/cp866: без этого print кириллицы и стрелок падает."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_utf8_console()
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
