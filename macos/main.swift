@@ -34,6 +34,8 @@ let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клав
 let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
 let isService = CommandLine.arguments.contains("--service")  // запущены службой launchd, а не вручную
 let openNote = Notification.Name("com.alex.f5voice.open")       // «покажи окно» от повторного запуска
+let toggleNote = Notification.Name("com.alex.f5voice.toggle")   // F5Voice --toggle: начать/закончить запись
+let cancelNote = Notification.Name("com.alex.f5voice.cancel")   // F5Voice --cancel
 let quitNote = Notification.Name("com.alex.f5voice.quit")       // «уступи место службе» ручному экземпляру
 var tookOver = false                                            // служба заменила ручной экземпляр
 
@@ -493,75 +495,106 @@ enum HUDBars { case none, live, wave }
 /// Цикл полос «жидкого металла» (как в шейдере paper-design liquid metal, которым сделаны кнопки
 /// Vengeance UI): тонкая белая, тонкая тёмная, снова белая и длинный градиент от белого к почти чёрному.
 let chromeCycle: [(CGFloat, NSColor)] = [
-    (0.000, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.045, NSColor(calibratedWhite: 0.98, alpha: 1)),
-    (0.050, NSColor(calibratedWhite: 0.14, alpha: 1)), (0.080, NSColor(calibratedWhite: 0.14, alpha: 1)),
-    (0.085, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.120, NSColor(calibratedWhite: 0.98, alpha: 1)),
-    (0.130, NSColor(calibratedWhite: 0.93, alpha: 1)), (0.480, NSColor(calibratedWhite: 0.62, alpha: 1)),
+    (0.000, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.040, NSColor(calibratedWhite: 0.98, alpha: 1)),
+    (0.055, NSColor(calibratedWhite: 0.14, alpha: 1)), (0.080, NSColor(calibratedWhite: 0.14, alpha: 1)),
+    (0.095, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.120, NSColor(calibratedWhite: 0.98, alpha: 1)),
+    (0.140, NSColor(calibratedWhite: 0.93, alpha: 1)), (0.480, NSColor(calibratedWhite: 0.62, alpha: 1)),
     (0.780, NSColor(calibratedWhite: 0.28, alpha: 1)), (1.000, NSColor(calibratedWhite: 0.09, alpha: 1)),
 ]
+let hudResizeDuration = 0.22
 
-/// Хромовое кольцо по краю плашки: угловой градиент из четырёх циклов полос, медленно вращается.
+/// Хромовое кольцо по краю плашки: полосы хрома медленно текут вдоль капсулы (равномерно,
+/// без резких рывков на длинных сторонах), сверху кольцо светлее, снизу темнее — объём.
 final class MetalRing {
     let layer = CALayer()
-    private let gradient = CAGradientLayer()
+    private let sheen = CAGradientLayer()
+    private let shade = CAGradientLayer()
     private let mask = CAShapeLayer()
+    private var period: CGFloat = 0
     let width: CGFloat = 3
 
     init() {
-        gradient.type = .conic
-        gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
-        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        sheen.type = .axial
+        sheen.startPoint = CGPoint(x: 0, y: 0.5)
+        sheen.endPoint = CGPoint(x: 1, y: 0.5)
         var colors: [CGColor] = []
         var locations: [NSNumber] = []
-        let repetition = 4
-        for r in 0..<repetition {
+        let cycles = 8  // слой вдвое шире кольца: четыре цикла полос на ширину, восемь на слой
+        for r in 0..<cycles {
             for (t, c) in chromeCycle {
                 colors.append(c.cgColor)
-                locations.append(NSNumber(value: (Double(r) + Double(t)) / Double(repetition)))
+                locations.append(NSNumber(value: (Double(r) + Double(t)) / Double(cycles)))
             }
         }
-        gradient.colors = colors
-        gradient.locations = locations
+        sheen.colors = colors
+        sheen.locations = locations
+        sheen.anchorPoint = .zero
+        shade.type = .axial
+        shade.startPoint = CGPoint(x: 0.5, y: 1)
+        shade.endPoint = CGPoint(x: 0.5, y: 0)
+        shade.colors = [NSColor(calibratedWhite: 1, alpha: 0.5).cgColor, NSColor(calibratedWhite: 1, alpha: 0).cgColor,
+                        NSColor(calibratedWhite: 0, alpha: 0.45).cgColor]
+        shade.locations = [0, 0.45, 1]
         mask.fillColor = nil
         mask.strokeColor = NSColor.black.cgColor
         mask.lineWidth = width
         layer.mask = mask
-        layer.addSublayer(gradient)
-        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-        spin.fromValue = 0
-        spin.toValue = -2 * Double.pi
-        spin.duration = 9
-        spin.repeatCount = .infinity
-        gradient.add(spin, forKey: "spin")
+        layer.addSublayer(sheen)
+        layer.addSublayer(shade)
     }
 
-    func layout(in bounds: CGRect, cornerRadius: CGFloat) {
+    func layout(in bounds: CGRect, cornerRadius: CGFloat, animated: Bool) {
+        let path = CGPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2),
+                          cornerWidth: cornerRadius - width / 2, cornerHeight: cornerRadius - width / 2, transform: nil)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer.frame = bounds
         mask.frame = bounds
-        mask.path = CGPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2),
-                           cornerWidth: cornerRadius - width / 2, cornerHeight: cornerRadius - width / 2, transform: nil)
-        let side = hypot(bounds.width, bounds.height) + 8
-        gradient.bounds = CGRect(x: 0, y: 0, width: side, height: side)
-        gradient.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        shade.frame = bounds
+        if animated, let from = mask.presentation()?.path ?? mask.path {
+            let a = CABasicAnimation(keyPath: "path")
+            a.fromValue = from
+            a.toValue = path
+            a.duration = hudResizeDuration
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            mask.add(a, forKey: "path")
+        }
+        mask.path = path
+        if abs(bounds.width - period) > 0.5 {
+            period = bounds.width
+            sheen.removeAnimation(forKey: "flow")
+            sheen.bounds = CGRect(x: 0, y: 0, width: period * 2, height: bounds.height)
+            sheen.position = .zero
+            let flow = CABasicAnimation(keyPath: "position.x")
+            flow.fromValue = 0
+            flow.toValue = -period
+            flow.duration = Double(period) / 34   // около 34 px/с: спокойное течение
+            flow.repeatCount = .infinity
+            flow.timingFunction = CAMediaTimingFunction(name: .linear)
+            sheen.add(flow, forKey: "flow")
+        }
         CATransaction.commit()
     }
 }
+
 enum HUDAnim { case none, breathe, pulse, variableColor }
 
-/// Полоски: в режиме live бегут за микрофоном, в режиме wave — волна «думаю».
 final class BarsView: NSView {
     var mode: HUDBars = .none { didSet { needsDisplay = true } }
-    private var history = [Float](repeating: 0, count: 10)
+    private var history = [CGFloat](repeating: 0, count: 11)   // 10 видимых + один въезжает справа
     private var phase: CGFloat = 0
+    private var smoothed: CGFloat = 0
+    private var lastPush = CACurrentMediaTime()
+    private var pushInterval = 0.05
     private var timer: Timer?
+    private let barW: CGFloat = 3
+    private let gap: CGFloat = 2.5
 
     func start() {
         stop()
-        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            if self.mode == .wave { self.phase += 0.16 }
+            if self.mode == .wave { self.phase += 0.075 }
             self.needsDisplay = true
         }
         RunLoop.main.add(t, forMode: .common)
@@ -574,37 +607,53 @@ final class BarsView: NSView {
     }
 
     func reset() {
-        history = [Float](repeating: 0, count: history.count)
+        history = [CGFloat](repeating: 0, count: history.count)
         phase = 0
+        smoothed = 0
+        lastPush = CACurrentMediaTime()
     }
 
+    /// Новый отсчёт уровня (20 раз в секунду). Столбики едут влево непрерывно: между отсчётами
+    /// сдвиг интерполируется по времени, а сам уровень сглажен, чтобы не прыгал.
     func push(_ level: Float) {
+        let now = CACurrentMediaTime()
+        pushInterval = max(0.02, min(0.2, now - lastPush))
+        lastPush = now
+        smoothed += (CGFloat(max(0, min(1, level))) - smoothed) * 0.55
         history.removeFirst()
-        history.append(level)
+        history.append(smoothed)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let n = history.count
-        let barW: CGFloat = 3
-        let gap: CGFloat = 2.5
+        let n = history.count - 1
+        let pitch = barW + gap
         let totalW = CGFloat(n) * barW + CGFloat(n - 1) * gap
-        var x = (bounds.width - totalW) / 2
+        let x0 = (bounds.width - totalW) / 2
         let minH: CGFloat = 3
         let maxH = bounds.height
-        for i in 0..<n {
-            var v: CGFloat
-            switch mode {
-            case .live: v = CGFloat(history[i])
-            case .wave: v = 0.5 + 0.5 * sin(phase - CGFloat(i) * 0.65)
-            case .none: v = 0
+        func bar(at x: CGFloat, value: CGFloat, alpha: CGFloat) {
+            let h = minH + (maxH - minH) * max(0, min(1, value))
+            NSColor.white.withAlphaComponent(max(0, min(1, alpha))).setFill()
+            NSBezierPath(roundedRect: NSRect(x: x, y: (bounds.height - h) / 2, width: barW, height: h),
+                         xRadius: barW / 2, yRadius: barW / 2).fill()
+        }
+        switch mode {
+        case .live:
+            let frac = CGFloat(min(1, (CACurrentMediaTime() - lastPush) / pushInterval))
+            for i in 0...n {
+                let pos = CGFloat(i) - frac                    // 0 — левый край, n-1 — правый
+                var alpha = 0.3 + 0.7 * pos / CGFloat(n - 1)
+                if pos < 0 { alpha *= 1 + pos }                // уходящий гаснет
+                if pos > CGFloat(n - 1) { alpha *= CGFloat(n) - pos }  // входящий проявляется
+                bar(at: x0 + pos * pitch, value: history[i], alpha: alpha)
             }
-            v = max(0, min(1, v))
-            let h = minH + (maxH - minH) * v
-            let rect = NSRect(x: x, y: (bounds.height - h) / 2, width: barW, height: h)
-            let alpha: CGFloat = mode == .live ? 0.35 + 0.65 * CGFloat(i + 1) / CGFloat(n) : 0.5 + 0.5 * v
-            NSColor.white.withAlphaComponent(alpha).setFill()
-            NSBezierPath(roundedRect: rect, xRadius: barW / 2, yRadius: barW / 2).fill()
-            x += barW + gap
+        case .wave:
+            for i in 0..<n {
+                let v = 0.5 + 0.5 * sin(phase - CGFloat(i) * 0.65)
+                bar(at: x0 + CGFloat(i) * pitch, value: v, alpha: 0.5 + 0.5 * v)
+            }
+        case .none:
+            break
         }
     }
 }
@@ -617,6 +666,8 @@ final class HUD {
     private var hideWork: DispatchWorkItem?
     private let height: CGFloat = 50
     private var ring: MetalRing?
+    private var generation = 0        // растёт на каждом показе: устаревшее скрытие не сработает
+    private var hiding = false
     let style: String
 
     init(style: String) {
@@ -716,7 +767,7 @@ final class HUD {
             bars.start()
         }
         setText(text)
-        panel.orderFrontRegardless()
+        present()
         if let t = hideAfter {
             let w = DispatchWorkItem { [weak self] in self?.hide() }
             hideWork = w
@@ -727,6 +778,23 @@ final class HUD {
     func setText(_ text: String) {
         label.stringValue = text
         layout()
+    }
+
+    /// Плашка «материализуется»: из прозрачной и чуть ниже — в полную, за 0,3 с с замедлением к концу.
+    private func present() {
+        generation += 1
+        if panel.isVisible && !hiding { return }
+        hiding = false
+        let target = panel.frame
+        panel.alphaValue = 0
+        panel.setFrame(target.offsetBy(dx: 0, dy: -10), display: false)
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.3
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(target, display: true)
+        }
     }
 
     func push(level: Float) {
@@ -751,16 +819,43 @@ final class HUD {
         let w = x + labelW + pad + 2
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
-        panel.setFrame(NSRect(x: vf.midX - w / 2, y: vf.minY + 48, width: w, height: height), display: true)
-        ring?.layout(in: CGRect(x: 0, y: 0, width: w, height: height), cornerRadius: 25)
+        let target = NSRect(x: vf.midX - w / 2, y: vf.minY + 48, width: w, height: height)
+        let animated = panel.isVisible && !hiding && panel.alphaValue > 0.99 && abs(panel.frame.width - w) > 0.5
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = hudResizeDuration
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(target, display: true)
+            }
+        } else {
+            panel.setFrame(target, display: true)
+        }
+        ring?.layout(in: CGRect(x: 0, y: 0, width: w, height: height), cornerRadius: 25, animated: animated)
     }
 
+    /// Уходит за 0,2 с: гаснет и чуть опускается; если за это время снова позвали show — остаётся.
     func hide() {
         hideWork?.cancel()
         hideWork = nil
+        guard panel.isVisible, !hiding else { return }
+        hiding = true
+        generation += 1
+        let gen = generation
         bars.stop()
-        icon.removeAllSymbolEffects()
-        panel.orderOut(nil)
+        let frame = panel.frame
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.2
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(frame.offsetBy(dx: 0, dy: -8), display: true)
+        }, completionHandler: { [weak self] in
+            guard let self = self, self.generation == gen else { return }
+            self.hiding = false
+            self.icon.removeAllSymbolEffects()
+            self.panel.orderOut(nil)
+            self.panel.alphaValue = 1
+            self.panel.setFrame(frame, display: false)
+        })
     }
 }
 
@@ -814,6 +909,8 @@ final class App: NSObject, NSApplicationDelegate {
         }
         let center = DistributedNotificationCenter.default()
         center.addObserver(forName: openNote, object: nil, queue: .main) { [weak self] _ in self?.showSettings() }
+        center.addObserver(forName: toggleNote, object: nil, queue: .main) { [weak self] _ in self?.toggle() }
+        center.addObserver(forName: cancelNote, object: nil, queue: .main) { [weak self] _ in self?.cancel() }
         center.addObserver(forName: quitNote, object: nil, queue: .main) { [weak self] _ in
             guard !isService else { return }
             log("служба F5Voice запустилась — ручной экземпляр уступает ей место")
@@ -1278,6 +1375,15 @@ if CommandLine.arguments.contains("--check") {
     print("newline: терминалы — \(c.newlineInTerminals), остальные — \(c.newlineElsewhere)")
     print("воркер: \(workerScript) — \(FileManager.default.fileExists(atPath: workerScript) ? "есть" : "НЕТ")")
     print("python: \(python) — \(FileManager.default.isExecutableFile(atPath: python) ? "есть" : "НЕТ")")
+    exit(0)
+}
+
+// F5Voice --toggle / --cancel: команда работающему экземпляру (для скриптов, Shortcuts, Raycast).
+for (flag, note) in [("--toggle", toggleNote), ("--cancel", cancelNote)] where CommandLine.arguments.contains(flag) {
+    let running = !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? launchdLabel)
+        .filter { $0.processIdentifier != getpid() }.isEmpty
+    guard running else { print("F5Voice не запущен"); exit(1) }
+    DistributedNotificationCenter.default().postNotificationName(note, object: nil, userInfo: nil, deliverImmediately: true)
     exit(0)
 }
 

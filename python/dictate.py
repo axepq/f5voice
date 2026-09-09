@@ -577,8 +577,10 @@ class HUD(threading.Thread):
     }
     # Цикл полос как в шейдере liquid metal (paper-design, кнопки Vengeance UI): тонкая белая,
     # тонкая тёмная, снова белая и длинный градиент от белого к почти чёрному.
-    CHROME = [(0.000, 250), (0.045, 250), (0.050, 36), (0.080, 36), (0.085, 250), (0.120, 250),
-              (0.130, 237), (0.480, 158), (0.780, 72), (1.000, 23)]
+    CHROME = [(0.000, 250), (0.040, 250), (0.055, 36), (0.080, 36), (0.095, 250), (0.120, 250),
+              (0.140, 237), (0.480, 158), (0.780, 72), (1.000, 23)]
+    TICK_MS = 33          # 30 кадров в секунду
+    ALPHA = 0.94          # непрозрачность плашки; появление и уход — плавным затуханием
 
     def __init__(self, app, level_fn, style="glass"):
         super().__init__(daemon=True)
@@ -591,7 +593,12 @@ class HUD(threading.Thread):
         self.text = ""
         self.hide_at = None
         self.phase = 0.0
-        self.hist = collections.deque([0.0] * 10, maxlen=10)
+        self.hist = collections.deque([0.0] * 11, maxlen=11)   # 10 видимых столбиков + въезжающий справа
+        self.scroll = 0.0       # сдвиг столбиков в пикселях, 0…6
+        self.level = 0.0        # сглаженный уровень
+        self.alpha = 0.0        # текущая прозрачность окна
+        self.alpha_target = 0.0
+        self.closing = False
         self.start()
 
     def show(self, state, text, ttl=None):
@@ -641,10 +648,11 @@ class HUD(threading.Thread):
             root.withdraw()
             root.overrideredirect(True)
             root.attributes("-topmost", True)
+            self.can_fade = True
             try:
-                root.attributes("-alpha", 0.93)
+                root.attributes("-alpha", 0.0)
             except tk.TclError:
-                pass
+                self.can_fade = False
             self.W, self.H = 460, 56
             bg, self.fg, _ = self.STYLES[self.style]
             self.bg = bg
@@ -657,10 +665,18 @@ class HUD(threading.Thread):
             self.root = root
             self.tk = tk
             self._apply_windows_glass(root)
-            root.after(40, self._tick)
+            root.after(self.TICK_MS, self._tick)
             root.mainloop()
         except Exception as e:  # noqa: BLE001
             log(f"плашка отключена: {type(e).__name__}: {e}")
+
+    def _set_alpha(self, a):
+        self.alpha = a
+        if self.can_fade:
+            try:
+                self.root.attributes("-alpha", a)
+            except self.tk.TclError:
+                self.can_fade = False
 
     def _tick(self):
         try:
@@ -670,22 +686,49 @@ class HUD(threading.Thread):
                     self.state, self.text = state, text
                     self.hide_at = time.time() + ttl if ttl else None
                     if state == "recording":
-                        self.hist.extend([0.0] * 10)
-                    self.root.deiconify()
+                        self.hist.extend([0.0] * len(self.hist))
+                        self.level = 0.0
+                    self.closing = False
+                    self.alpha_target = self.ALPHA
+                    if self.root.state() == "withdrawn":
+                        self._set_alpha(0.0)
+                        self.root.deiconify()
                     self.root.lift()
                 elif cmd == "settings":
                     self._settings_window()
                 else:
-                    self.state = None
-                    self.root.withdraw()
+                    self.closing = True
+                    self.alpha_target = 0.0
         except queue.Empty:
             pass
         if self.hide_at and time.time() > self.hide_at:
-            self.state, self.hide_at = None, None
+            self.hide_at = None
+            self.closing = True
+            self.alpha_target = 0.0
+        # Плавное появление (≈130 мс) и уход (≈200 мс)
+        if self.alpha != self.alpha_target:
+            step = 0.25 if self.alpha_target > self.alpha else -0.16
+            a = self.alpha + step
+            if (step > 0 and a >= self.alpha_target) or (step < 0 and a <= self.alpha_target):
+                a = self.alpha_target
+            self._set_alpha(a)
+            if not self.can_fade:
+                self.alpha = self.alpha_target
+        if self.closing and self.alpha <= 0.0:
+            self.closing = False
+            self.state = None
             self.root.withdraw()
         if self.state:
             self._draw()
-        self.root.after(40, self._tick)
+        self.root.after(self.TICK_MS, self._tick)
+
+    @staticmethod
+    def _blend(fg, bg, t):
+        """Цвет между bg (t=0) и fg (t=1) — замена прозрачности, которой у canvas нет."""
+        t = max(0.0, min(1.0, t))
+        f = [int(fg[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(bg[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#%02x%02x%02x" % tuple(int(b[i] + (f[i] - b[i]) * t) for i in range(3))
 
     @classmethod
     def chrome(cls, t):
@@ -727,7 +770,7 @@ class HUD(threading.Thread):
         """Хромовое кольцо по краю: четыре цикла полос бегут по периметру."""
         pts = self._pill_points(96, width / 2 + 1)
         n = len(pts) - 1
-        shift = self.phase * 0.012
+        shift = self.phase * 0.009
         for i in range(n):
             (x0, y0), (x1, y1) = pts[i], pts[i + 1]
             c.create_line(x0, y0, x1, y1, fill=self.chrome(i / n * repetition + shift), width=width, capstyle="round")
@@ -742,15 +785,32 @@ class HUD(threading.Thread):
             if self.cutout:  # капсула на прозрачном окне
                 c.create_polygon(*[v for xy in self._pill_points(96, 1) for v in xy], fill=self.bg, outline="")
             self._draw_metal_ring(c)
-        r = 7 + (2.5 * abs(math.sin(self.phase * 0.6)) if self.state == "recording" else 0)
+        r = 7 + (2.5 * (0.5 + 0.5 * math.sin(self.phase * 0.6)) if self.state == "recording" else 0)
         c.create_oval(22 - r, cy - r, 22 + r, cy + r, fill=color, outline="")
         x = 46
-        if self.state in ("recording", "transcribing"):
-            if self.state == "recording":
-                self.hist.append(float(self.level_fn() or 0.0))
+        if self.state == "recording":
+            # Столбики едут влево непрерывно (2 px за кадр), новый отсчёт въезжает справа и проявляется
+            self.level += (float(self.level_fn() or 0.0) - self.level) * 0.5
+            self.scroll += 2.0
+            if self.scroll >= 6.0:
+                self.scroll -= 6.0
+                self.hist.append(max(0.0, min(1.0, self.level)))
+            f = self.scroll / 6.0
+            for i in range(11):
+                v = self.hist[i]
+                h = 3 + 20 * v
+                fade = 1.0
+                if i == 0:
+                    fade = 1.0 - f
+                elif i == 10:
+                    fade = f
+                bx = x + i * 6 - self.scroll
+                c.create_rectangle(bx, cy - h / 2, bx + 3, cy + h / 2, fill=self._blend(self.fg, self.bg, fade), outline="")
+            x += 70
+        elif self.state == "transcribing":
             for i in range(10):
-                v = self.hist[i] if self.state == "recording" else 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
-                h = 3 + 20 * max(0.0, min(1.0, v))
+                v = 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
+                h = 3 + 20 * v
                 c.create_rectangle(x + i * 6, cy - h / 2, x + i * 6 + 3, cy + h / 2, fill=self.fg, outline="")
             x += 70
         c.create_text(x, cy, text=self.text, anchor="w", fill=self.fg, font=("Segoe UI", 12))
