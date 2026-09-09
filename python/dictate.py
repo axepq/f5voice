@@ -15,10 +15,13 @@
 что-то падает — пришлите ~/.f5voice/f5voice.log.
 """
 import argparse
+import collections
 import ctypes
 import glob
 import json
+import math
 import os
+import queue
 import platform
 import signal
 import subprocess
@@ -73,6 +76,7 @@ DEFAULTS = {
     "newline": "shift+enter",          # shift+enter | enter | ctrl+enter
     "input_device": None,              # номер или имя из --list-devices, None — по умолчанию
     "tray": True,                      # значок в области уведомлений (нужны pystray и Pillow)
+    "hud": True,                       # плашка внизу экрана: запись, уровень, распознавание, результат
 }
 
 
@@ -462,12 +466,15 @@ class Recorder:
         self.name = info["name"]
         self.frames = []
         self.stream = None
+        self.level = 0.0
 
     def start(self):
         self.frames = []
 
         def cb(indata, _frames, _time, status):
             self.frames.append(indata[:, 0].copy())
+            rms = float(np.sqrt((indata[:, 0] ** 2).mean()) + 1e-9)
+            self.level = max(0.0, min(1.0, (20 * math.log10(rms) + 55) / 55))
 
         self.stream = self.sd.InputStream(device=self.device, samplerate=self.rate, channels=1,
                                           dtype="float32", callback=cb)
@@ -538,6 +545,103 @@ class Typist:
         self.kb.type(lines[-1])
 
 
+# ---------------------------------------------------------------- плашка на экране
+
+class HUD(threading.Thread):
+    """Плашка внизу экрана, как на маке: точка, полоски уровня, текст. tkinter в своём потоке."""
+
+    COLORS = {"recording": "#ff4d4d", "transcribing": "#ffb347", "ok": "#5ad36b", "error": "#ff8a5c", "info": "#dddddd"}
+
+    def __init__(self, level_fn):
+        super().__init__(daemon=True)
+        self.level_fn = level_fn
+        self.q = queue.Queue()
+        self.state = None
+        self.text = ""
+        self.hide_at = None
+        self.phase = 0.0
+        self.hist = collections.deque([0.0] * 10, maxlen=10)
+        self.start()
+
+    def show(self, state, text, ttl=None):
+        self.q.put(("show", state, text, ttl))
+
+    def hide(self):
+        self.q.put(("hide", None, None, None))
+
+    def run(self):
+        try:
+            import tkinter as tk
+        except ImportError:
+            log("плашка недоступна: нет tkinter (Linux: sudo apt install python3-tk)")
+            return
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.overrideredirect(True)
+            root.attributes("-topmost", True)
+            try:
+                root.attributes("-alpha", 0.93)
+            except tk.TclError:
+                pass
+            self.W, self.H = 460, 56
+            self.canvas = tk.Canvas(root, width=self.W, height=self.H, bg="#141418", highlightthickness=0)
+            self.canvas.pack()
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            root.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 80}")
+            self.root = root
+            root.after(40, self._tick)
+            root.mainloop()
+        except Exception as e:  # noqa: BLE001
+            log(f"плашка отключена: {type(e).__name__}: {e}")
+
+    def _tick(self):
+        try:
+            while True:
+                cmd, state, text, ttl = self.q.get_nowait()
+                if cmd == "show":
+                    self.state, self.text = state, text
+                    self.hide_at = time.time() + ttl if ttl else None
+                    if state == "recording":
+                        self.hist.extend([0.0] * 10)
+                    self.root.deiconify()
+                    self.root.lift()
+                else:
+                    self.state = None
+                    self.root.withdraw()
+        except queue.Empty:
+            pass
+        if self.hide_at and time.time() > self.hide_at:
+            self.state, self.hide_at = None, None
+            self.root.withdraw()
+        if self.state:
+            self._draw()
+        self.root.after(40, self._tick)
+
+    def _draw(self):
+        c = self.canvas
+        c.delete("all")
+        self.phase += 0.18
+        color = self.COLORS.get(self.state, "#ffffff")
+        cy = self.H / 2
+        r = 7 + (2.5 * abs(math.sin(self.phase * 0.6)) if self.state == "recording" else 0)
+        c.create_oval(22 - r, cy - r, 22 + r, cy + r, fill=color, outline="")
+        x = 46
+        if self.state in ("recording", "transcribing"):
+            if self.state == "recording":
+                self.hist.append(float(self.level_fn() or 0.0))
+            for i in range(10):
+                v = self.hist[i] if self.state == "recording" else 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
+                h = 3 + 20 * max(0.0, min(1.0, v))
+                c.create_rectangle(x + i * 6, cy - h / 2, x + i * 6 + 3, cy + h / 2, fill="#ffffff", outline="")
+            x += 70
+        c.create_text(x, cy, text=self.text, anchor="w", fill="#ffffff", font=("Segoe UI", 12))
+
+
+def pretty_hotkey(normalized):
+    return "+".join(part.strip("<>").capitalize() for part in normalized.split("+"))
+
+
 # ---------------------------------------------------------------- значок в трее
 
 class Tray:
@@ -600,6 +704,7 @@ class App:
         self.tray = None
         self.hotkeys = None
         self.esc_listener = None
+        self.hud = None
         log(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер, {platform.processor() or '?'}")
         try:
             self.recorder = Recorder(cfg["input_device"])
@@ -608,6 +713,8 @@ class App:
             log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
                 "выбрать: \"input_device\" в config.json")
             sys.exit(1)
+        self.hud = HUD(lambda: self.recorder.level) if cfg.get("hud", True) else None
+        self.hotkey_title = pretty_hotkey(normalize_hotkey(cfg["hotkey"]))
         self.recognizer = Recognizer(cfg)
         self.typist = Typist(cfg)
         self.stop_timer = None
@@ -620,6 +727,10 @@ class App:
                 self.tray.set_state(state)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _show(self, state, text, ttl=None):
+        if self.hud:
+            self.hud.show(state, text, ttl)
 
     def toggle(self):
         with self.lock:
@@ -638,6 +749,7 @@ class App:
                 self.recorder.stop()
                 self._set_state("idle")
                 beep("stop")
+                self._show("info", "Отменено", 1.2)
                 log("отменено")
 
     def _start(self):
@@ -648,6 +760,7 @@ class App:
             return
         self._set_state("recording")
         beep("start")
+        self._show("recording", f"Говорите…   {self.hotkey_title} — готово · Esc — отмена")
         log(f"● говорите… ({self.cfg['hotkey']} — готово, Esc — отмена)")
         self.stop_timer = threading.Timer(float(self.cfg["max_record_seconds"]), self.toggle)
         self.stop_timer.daemon = True
@@ -659,6 +772,7 @@ class App:
         audio = self.recorder.stop()
         self._set_state("transcribing")
         beep("stop")
+        self._show("transcribing", "Распознаю…")
         threading.Thread(target=self._transcribe, args=(audio,), daemon=True).start()
 
     def _transcribe(self, audio):
@@ -668,21 +782,25 @@ class App:
             if quiet:
                 log(f"ничего не услышал (запись {dur} с, речи {speech} с)")
                 beep("error")
+                self._show("error", f"Ничего не услышал: запись {dur} с, речи {speech} с", 3)
                 return
             t = time.time()
             text, lang, scores, fixed = self.recognizer.recognize(audio)
             if not text:
                 log("ничего не разобрал")
                 beep("error")
+                self._show("error", "Модель ничего не разобрала", 3)
                 return
             log(f"готово: {len(text)} символов, язык {lang} {scores}"
                 f"{', исправлено ' + str(fixed) if fixed else ''}, {time.time() - t:.1f} с")
             if self.cfg["trailing_space"] and not text.endswith("\n"):
                 text += " "
+            self._show("ok", f"Напечатано {len(text.strip())} символов", 1.5)
             self.typist.type(text)
         except Exception as e:  # noqa: BLE001
             log(f"! ошибка распознавания: {type(e).__name__}: {e}")
             beep("error")
+            self._show("error", f"Ошибка: {type(e).__name__}: {str(e)[:60]}", 6)
         finally:
             with self.lock:
                 self._set_state("idle")

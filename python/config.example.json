@@ -10,5 +10,7 @@
   "max_record_seconds": 180,
   "typing": "type",
   "newline": "shift+enter",
-  "input_device": null
+  "input_device": null,
+  "tray": true,
+  "hud": true
 }

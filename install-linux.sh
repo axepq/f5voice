@@ -56,13 +56,13 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then SUDO="
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 if command -v apt-get >/dev/null 2>&1; then
     step "Системные пакеты через apt: python3, venv, portaudio, xclip (может спросить пароль)"
-    $SUDO apt-get install -y python3 python3-venv python3-pip libportaudio2 xclip || fail "apt-get не смог поставить пакеты"
+    $SUDO apt-get install -y python3 python3-venv python3-pip python3-tk libportaudio2 xclip || fail "apt-get не смог поставить пакеты"
 elif command -v dnf >/dev/null 2>&1; then
     step "Системные пакеты через dnf: python3, portaudio, xclip (может спросить пароль)"
-    $SUDO dnf install -y python3 python3-pip portaudio xclip || fail "dnf не смог поставить пакеты"
+    $SUDO dnf install -y python3 python3-pip python3-tkinter portaudio xclip || fail "dnf не смог поставить пакеты"
 elif command -v pacman >/dev/null 2>&1; then
     step "Системные пакеты через pacman: python, portaudio, xclip (может спросить пароль)"
-    $SUDO pacman -S --needed --noconfirm python python-pip portaudio xclip || fail "pacman не смог поставить пакеты"
+    $SUDO pacman -S --needed --noconfirm python python-pip tk portaudio xclip || fail "pacman не смог поставить пакеты"
 else
     step "Пакетный менеджер не распознан. Нужны: python3 (3.9+) с модулем venv, libportaudio2, xclip"
 fi
