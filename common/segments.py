@@ -18,9 +18,16 @@ def assemble(segments, duration, redecode=None, min_latin=0.6, min_words=3):
        он русский, бэкенд декодирует его заново с русским контекстом.
     """
     pieces, fixed, context, last = [], 0, "", None
-    for start, end, text in segments:
+    for seg in segments:
+        start, end, text = seg[0], seg[1], seg[2]
+        meta = seg[3] if len(seg) > 3 and isinstance(seg[3], dict) else {}
         text = (text or "").strip()
         if not text or start >= duration - 0.25:
+            continue
+        # Петля повторов даёт аномально сжимаемый текст; тишина — высокий no_speech при низкой уверенности.
+        if (meta.get("compression_ratio") or 0) > 2.4:
+            continue
+        if (meta.get("no_speech_prob") or 0) > 0.6 and (meta.get("avg_logprob") or 0) < -1.0:
             continue
         if text == last:
             continue

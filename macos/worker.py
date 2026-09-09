@@ -86,7 +86,7 @@ def main():
         alt = max(LANGS[1:], key=lambda l: scores[l])
         return (alt if scores[alt] >= ALT_MIN_PROB else LANGS[0]), scores
 
-    def run(audio, lang, prompt=PROMPT, temperature=(0.0, 0.2, 0.4)):
+    def run(audio, lang, prompt=PROMPT, temperature=(0.0, 0.2, 0.4, 0.6)):  # 0.6 сбрасывает контекст при петле
         return mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=MODEL,
@@ -104,7 +104,9 @@ def main():
     def recognize(audio):
         lang, scores = pick_language(audio)
         result = run(audio, lang)
-        segs = [(s["start"], s["end"], s.get("text", "")) for s in result.get("segments") or []]
+        segs = [(s["start"], s["end"], s.get("text", ""),
+                 {k: s.get(k) for k in ("compression_ratio", "no_speech_prob", "avg_logprob")})
+                for s in result.get("segments") or []]
         duration = audio.size / RATE
 
         def redecode(start, end, context):

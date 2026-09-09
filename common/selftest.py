@@ -69,6 +69,16 @@ def main():
     ok = text == "Привет Воспоминания." and fixed == 0
     failed += not ok
     print(("ok  " if ok else "FAIL") + f" сегменты: {text!r}")
+    from .textproc import collapse_repeats
+    loop = "И вот, " + "что вы можете сделать это, " * 30 + "что вы можете сделать"
+    got = collapse_repeats(loop)
+    ok = "сделать это, что вы можете сделать это" not in got and len(got) < 60
+    failed += not ok
+    print(("ok  " if ok else "FAIL") + f" петля повторов → {got!r}")
+    got = collapse_repeats("да да да, я приду завтра")
+    ok = got == "да да да, я приду завтра"
+    failed += not ok
+    print(("ok  " if ok else "FAIL") + f" одиночные слова не трогаем → {got!r}")
     ok = latin_share("Please open the settings page") == 1.0 and latin_share("Я задеплоил на Vercel") < 0.5
     failed += not ok
     print(("ok  " if ok else "FAIL") + " latin_share")

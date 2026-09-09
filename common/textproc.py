@@ -215,6 +215,45 @@ def apply_commands(text):
     return result.strip(" ")
 
 
+def _norm_word(w):
+    return re.sub(r"[^\w]+", "", w.lower())
+
+
+def collapse_repeats(text, min_words=2, max_words=10):
+    """Петля whisper: «что вы можете сделать это, » × 30. Группа из 2–10 слов, идущая подряд
+    3+ раз, схлопывается до одного вхождения; если она повторилась 4+ раз и заняла больше
+    половины текста — это галлюцинация целиком, группа удаляется."""
+    words = text.split()
+    n = len(words)
+    if n < 2 * min_words:
+        return text
+    norm = [_norm_word(w) for w in words]
+    out, i = [], 0
+    while i < n:
+        best = None
+        for size in range(min_words, max_words + 1):
+            if i + 2 * size > n:
+                break
+            unit = norm[i:i + size]
+            if not any(unit):
+                continue
+            reps = 1
+            while i + (reps + 1) * size <= n and norm[i + reps * size:i + (reps + 1) * size] == unit:
+                reps += 1
+            if reps >= 3 and (best is None or reps * size > best[0] * best[1]):
+                best = (reps, size)
+        if best:
+            reps, size = best
+            if not (reps >= 4 and reps * size > n / 2):
+                out.extend(words[i:i + size])
+            i += reps * size
+        else:
+            out.append(words[i])
+            i += 1
+    result = " ".join(out).strip(" ,;:")
+    return result if result else ""
+
+
 def finalize(text, prompt=DEFAULT_PROMPT):
     """Полная обработка сырого текста модели."""
-    return apply_commands(clean(text, prompt))
+    return apply_commands(collapse_repeats(clean(text, prompt)))

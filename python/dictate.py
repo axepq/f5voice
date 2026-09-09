@@ -424,7 +424,7 @@ class Recognizer:
         alt = max(self.langs[1:], key=lambda l: scores[l])
         return (alt if scores[alt] >= self.alt_min else self.langs[0]), scores
 
-    def run(self, audio, lang, prompt=None, temperature=(0.0, 0.2, 0.4)):
+    def run(self, audio, lang, prompt=None, temperature=(0.0, 0.2, 0.4, 0.6)):
         segments, _info = self.model.transcribe(
             audio,
             language=lang,
@@ -435,7 +435,9 @@ class Recognizer:
             beam_size=self.beam,
             vad_filter=False,
         )
-        return [(s.start, s.end, s.text) for s in segments]
+        return [(s.start, s.end, s.text, {"compression_ratio": s.compression_ratio,
+                                          "no_speech_prob": s.no_speech_prob, "avg_logprob": s.avg_logprob})
+                for s in segments]
 
     def recognize(self, audio):
         lang, scores = self.pick_language(audio)
@@ -450,7 +452,7 @@ class Recognizer:
             if p.get(self.langs[0], 0.0) < p.get("en", 0.0):
                 return None
             again = self.run(chunk, self.langs[0], prompt=(context or RU_HINT), temperature=0.0)
-            return " ".join(t.strip() for _, _, t in again).strip()
+            return " ".join(seg[2].strip() for seg in again).strip()
 
         may_fix = lang == self.langs[0] and scores.get("en", 0.0) < 0.6
         text, fixed = assemble(segs, duration, redecode if may_fix else None)
