@@ -310,6 +310,66 @@ def normalize_hotkey(spec):
     return "+".join(parts)
 
 
+_VK = {"space": 0x20, "enter": 0x0D, "tab": 0x09, "esc": 0x1B, "backspace": 0x08, "insert": 0x2D,
+       "delete": 0x2E, "home": 0x24, "end": 0x23, "page_up": 0x21, "page_down": 0x22, "pause": 0x13,
+       "scroll_lock": 0x91, "print_screen": 0x2C, "caps_lock": 0x14, "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28}
+
+
+def win_hotkey_spec(normalized):
+    """«<ctrl>+<alt>+<space>» → (модификаторы, виртуальный код) для RegisterHotKey, иначе None."""
+    mods, vk = 0x4000, None  # MOD_NOREPEAT
+    for part in normalized.split("+"):
+        name = part.strip("<>")
+        if name == "ctrl":
+            mods |= 0x0002
+        elif name == "alt":
+            mods |= 0x0001
+        elif name == "shift":
+            mods |= 0x0004
+        elif name == "cmd":
+            mods |= 0x0008
+        elif name in _VK:
+            vk = _VK[name]
+        elif name[:1] == "f" and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
+            vk = 0x70 + int(name[1:]) - 1
+        elif len(name) == 1 and name.isalnum():
+            vk = ord(name.upper())
+        else:
+            return None
+    return (mods, vk) if vk is not None else None
+
+
+class WinHotkey(threading.Thread):
+    """Глобальное сочетание через RegisterHotKey — родной способ Windows, надёжнее хуков pynput."""
+
+    def __init__(self, mods, vk, on_press):
+        super().__init__(daemon=True)
+        self.mods, self.vk, self.on_press = mods, vk, on_press
+        self.ready = threading.Event()
+        self.ok = False
+        self.error = ""
+
+    def run(self):
+        import ctypes.wintypes
+
+        user32 = ctypes.windll.user32
+        if not user32.RegisterHotKey(None, 1, self.mods, self.vk):
+            self.error = f"RegisterHotKey: код {ctypes.GetLastError()} (сочетание занято другой программой?)"
+            self.ready.set()
+            return
+        self.ok = True
+        self.ready.set()
+        msg = ctypes.wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            if msg.message == 0x0312:  # WM_HOTKEY
+                try:
+                    self.on_press()
+                except Exception as e:  # noqa: BLE001
+                    log(f"! обработчик клавиши: {e}")
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+
 def beep(kind="start"):
     if IS_WINDOWS:
         try:
@@ -535,6 +595,7 @@ class App:
         self.lock = threading.Lock()
         self.tray = None
         self.hotkeys = None
+        self.esc_listener = None
         log(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер, {platform.processor() or '?'}")
         try:
             self.recorder = Recorder(cfg["input_device"])
@@ -624,7 +685,7 @@ class App:
 
     def quit(self):
         log("выход")
-        if self.hotkeys:
+        if self.hotkeys and hasattr(self.hotkeys, "stop"):
             self.hotkeys.stop()
         if self.tray:
             self.tray.stop()
@@ -634,13 +695,40 @@ class App:
     def _setup(self):
         from pynput import keyboard
 
-        try:
-            hotkey = normalize_hotkey(self.cfg["hotkey"])
-            self.hotkeys = keyboard.GlobalHotKeys({hotkey: self.toggle, "<esc>": self.cancel})
-            self.hotkeys.start()
-            log(f"[READY] готов: {hotkey} — диктовка, Esc — отмена, Ctrl+C — выход.")
-        except Exception as e:  # noqa: BLE001
-            log(f"[READY] глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
+        hotkey = normalize_hotkey(self.cfg["hotkey"])
+        registered = ""
+        if IS_WINDOWS:
+            spec = win_hotkey_spec(hotkey)
+            if spec:
+                wh = WinHotkey(spec[0], spec[1], self.toggle)
+                wh.start()
+                wh.ready.wait(3)
+                if wh.ok:
+                    registered = "RegisterHotKey"
+                    self.hotkeys = wh
+                else:
+                    log(f"RegisterHotKey не удался ({wh.error}) — пробую pynput")
+            try:  # Esc — через слушатель pynput, RegisterHotKey отобрал бы Esc у всех программ
+                self.esc_listener = keyboard.Listener(
+                    on_press=lambda k: self.cancel() if k == keyboard.Key.esc else None)
+                self.esc_listener.daemon = True
+                self.esc_listener.start()
+            except Exception as e:  # noqa: BLE001
+                log(f"Esc для отмены недоступен ({e})")
+        if not registered:
+            try:
+                keys = {hotkey: self.toggle}
+                if "<alt>" in hotkey:  # правый Alt на Windows/Linux приходит как alt_gr
+                    keys[hotkey.replace("<alt>", "<alt_gr>")] = self.toggle
+                if not IS_WINDOWS:
+                    keys["<esc>"] = self.cancel
+                self.hotkeys = keyboard.GlobalHotKeys(keys)
+                self.hotkeys.start()
+                registered = "pynput"
+            except Exception as e:  # noqa: BLE001
+                log(f"[READY] глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
+                return
+        log(f"[READY] готов: {hotkey} — диктовка ({registered}), Esc — отмена, Ctrl+C — выход.")
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":
             log("Wayland: глобальные клавиши через pynput не работают. Назначь в настройках рабочего стола "
                 "сочетание на команду «python python/dictate.py --toggle».")
