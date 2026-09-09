@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # F5Voice для macOS на Apple Silicon: установка одной командой.
-#   curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh | bash
+#   bash <(curl -fsSL --connect-timeout 20 https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh)
 # Можно и из клона репозитория: ./install-macos.sh
 # Ставит Command Line Tools (если их нет), своё Python-окружение с mlx-whisper,
 # скачивает модель, собирает приложение, включает автозапуск. Повторный запуск обновляет.
@@ -12,9 +12,10 @@ SRC="$HOME_DIR/src"
 LABEL="com.alex.f5voice"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-step() { printf '\033[36m▸\033[0m %s\n' "$1"; }
-fail() { printf '\033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
+step() { printf '\n\033[36m▸ %s\033[0m\n' "$1"; }
+fail() { printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 
+echo "F5Voice: установка для macOS начинается, это займёт несколько минут."
 [[ "$(uname -s)" == Darwin ]] || fail "Это установщик для macOS. Linux — install-linux.sh, Windows — install-windows.ps1"
 [[ "$(uname -m)" == arm64 ]] || fail "Нужен Mac на Apple Silicon (M1 и новее): mlx-whisper не работает на Intel"
 OSV="$(sw_vers -productVersion)"
@@ -53,24 +54,26 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/macos/main.swift" ]]; then
 else
     if git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
         step "Обновляю исходники F5Voice"
-        git -C "$SRC" pull --ff-only --quiet || fail "не удалось обновить $SRC"
+        git -C "$SRC" pull --ff-only || fail "не удалось обновить $SRC"
     else
-        [[ -e "$SRC" ]] && fail "$SRC уже существует, но это не репозиторий. Убери его и запусти команду снова."
         step "Скачиваю F5Voice"
-        git clone --depth 1 --quiet "$REPO_URL" "$SRC"
+        git clone --depth 1 "$REPO_URL" "$SRC.new" || fail "не удалось скачать исходники. Проверь доступ к github.com; если он закрыт, нужен VPN."
+        rm -rf "$SRC"
+        mv "$SRC.new" "$SRC"
     fi
-    exec bash "$SRC/install-macos.sh"
+    if [[ -r /dev/tty ]]; then exec bash "$SRC/install-macos.sh" </dev/tty; else exec bash "$SRC/install-macos.sh"; fi
 fi
 
-step "Python-окружение"
+step "Python-окружение в $HOME_DIR/venv"
 [[ -x "$HOME_DIR/venv/bin/python" ]] || python3 -m venv "$HOME_DIR/venv"
-"$HOME_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$HOME_DIR/venv/bin/pip" install --quiet -r "$SRC/macos/requirements.txt" || fail "pip не смог поставить зависимости"
+"$HOME_DIR/venv/bin/pip" install --upgrade pip | tail -1
+step "Зависимости (mlx-whisper и остальное, около 500 МБ)"
+"$HOME_DIR/venv/bin/pip" install -r "$SRC/macos/requirements.txt" || fail "pip не смог поставить зависимости"
 
 [[ -f "$HOME_DIR/config.json" ]] || cp "$SRC/macos/config.example.json" "$HOME_DIR/config.json"
 MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('model') or 'mlx-community/whisper-large-v3-turbo')")"
 
-step "Модель $MODEL (первый раз около 1,5 ГБ)"
+step "Модель $MODEL (первый раз около 1,5 ГБ, ниже будет прогресс)"
 "$HOME_DIR/venv/bin/python" - "$MODEL" <<'PY' || fail "не удалось скачать модель $MODEL — проверь интернет и имя модели в $HOME_DIR/config.json"
 import sys
 from huggingface_hub import snapshot_download
@@ -81,12 +84,16 @@ step "Прогрев Python-пакетов (первый импорт компи
 "$HOME_DIR/venv/bin/python" -c "import mlx_whisper, numpy" >/dev/null 2>&1 || true
 
 step "Проверка ядра"
-(cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest >/dev/null) \
-    || { (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest) || fail "самопроверка ядра не прошла — см. вывод выше"; }
+(cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest | tail -1) || fail "самопроверка ядра не прошла"
 
 step "Сборка приложения"
 F5VOICE_HOME="$HOME_DIR" zsh "$SRC/macos/build.sh"
 F5VOICE_HOME="$HOME_DIR" "$HOME_DIR/F5Voice.app/Contents/MacOS/F5Voice" --check | sed 's/^/    /'
+
+if [[ -n "${F5VOICE_NO_SERVICE:-}" ]]; then
+    printf '\n\033[32mСобрано без запуска службы (F5VOICE_NO_SERVICE).\033[0m\n'
+    exit 0
+fi
 
 step "Служба автозапуска"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true

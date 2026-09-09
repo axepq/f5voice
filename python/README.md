@@ -14,18 +14,18 @@ Windows/Linux не проверялась. Если что-то падает, п
 Linux, в терминале:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh | bash
+bash <(curl -fsSL --connect-timeout 20 https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh)
 ```
 
 Windows, в PowerShell:
 
 ```
-irm https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
+irm -TimeoutSec 60 https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
 ```
 
-Установщик сам ставит недостающее (git, на Windows и Python — через winget),
-скачивает исходники в `~/.f5voice/src`, создаёт своё окружение и запускает
-F5Voice. Из клона репозитория: `./install-linux.sh` или
+Установщик сам ставит недостающее (на Linux пакеты через apt/dnf/pacman, на
+Windows Python через winget), скачивает исходники архивом в `~/.f5voice/src`
+(git не нужен), создаёт своё окружение и запускает F5Voice. Из клона репозитория: `./install-linux.sh` или
 `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`.
 
 Что делает установщик: ставит недостающее (Windows — Python 3.12 и Git через

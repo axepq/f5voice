@@ -1,4 +1,4 @@
-﻿# Полное удаление F5Voice с Windows. Кэш модели в %USERPROFILE%\.cache\huggingface не трогает.
+# Removes F5Voice from Windows. The model cache in %USERPROFILE%\.cache\huggingface is kept.
 $HomeDir = if ($env:F5VOICE_HOME) { $env:F5VOICE_HOME } else { Join-Path $HOME ".f5voice" }
 Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
     Where-Object { $_.CommandLine -like "*python\dictate.py*" } |
@@ -7,4 +7,4 @@ Remove-Item (Join-Path ([Environment]::GetFolderPath("Startup")) "F5Voice.lnk") 
 $Src = Join-Path $HomeDir "src"
 if ((Test-Path $Src) -and ((Get-Item $Src).Attributes -band [IO.FileAttributes]::ReparsePoint)) { (Get-Item $Src).Delete() }
 Remove-Item -Recurse -Force $HomeDir -ErrorAction SilentlyContinue
-Write-Host "F5Voice удалён."
+Write-Host "F5Voice removed."

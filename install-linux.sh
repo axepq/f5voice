@@ -1,44 +1,25 @@
 #!/usr/bin/env bash
 # F5Voice для Linux: установка одной командой.
-#   curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh | bash
+#   bash <(curl -fsSL --connect-timeout 20 https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh)
 # Можно и из клона репозитория: ./install-linux.sh
-# Ставит системные пакеты (git, python3-venv, portaudio, xclip), своё Python-окружение
-# с faster-whisper, скачивает модель, включает автозапуск в графической сессии и запускает.
+# Ставит системные пакеты (python3-venv, portaudio, xclip), скачивает исходники архивом
+# (git не нужен), создаёт своё Python-окружение с faster-whisper, скачивает модель,
+# включает автозапуск в графической сессии и запускает. Повторный запуск обновляет.
 set -euo pipefail
 
-REPO_URL="https://github.com/axepq/f5voice.git"
+REPO="axepq/f5voice"
+TARBALL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
 HOME_DIR="${F5VOICE_HOME:-$HOME/.f5voice}"
 SRC="$HOME_DIR/src"
 
-step() { printf '\033[36m▸\033[0m %s\n' "$1"; }
-fail() { printf '\033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
+step() { printf '\n\033[36m▸ %s\033[0m\n' "$1"; }
+fail() { printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 
+echo "F5Voice: установка для Linux начинается, это займёт несколько минут."
 [[ "$(uname -s)" == Linux ]] || fail "Это установщик для Linux. macOS — install-macos.sh, Windows — install-windows.ps1"
 
-SUDO=""
-if [[ ${EUID:-$(id -u)} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
-if command -v apt-get >/dev/null 2>&1; then
-    step "Системные пакеты (apt): git, python3, venv, portaudio, xclip — может спросить пароль"
-    $SUDO apt-get install -y -qq git python3 python3-venv python3-pip libportaudio2 xclip >/dev/null \
-        || fail "apt-get не смог поставить пакеты"
-elif command -v dnf >/dev/null 2>&1; then
-    step "Системные пакеты (dnf): git, python3, portaudio, xclip — может спросить пароль"
-    $SUDO dnf install -y -q git python3 python3-pip portaudio xclip >/dev/null || fail "dnf не смог поставить пакеты"
-elif command -v pacman >/dev/null 2>&1; then
-    step "Системные пакеты (pacman): git, python, portaudio, xclip — может спросить пароль"
-    $SUDO pacman -S --needed --noconfirm git python python-pip portaudio xclip >/dev/null || fail "pacman не смог поставить пакеты"
-else
-    step "Пакетный менеджер не распознан. Нужны: git, python3 (3.9+) с модулем venv, libportaudio2, xclip"
-fi
-command -v git >/dev/null 2>&1 || fail "нет git"
-command -v python3 >/dev/null 2>&1 || fail "нет python3"
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
-    || fail "нужен Python 3.9 или новее, сейчас $(python3 --version)"
-
-mkdir -p "$HOME_DIR"
-
-# Откуда исходники: запущены из файла внутри клона — используем его,
-# иначе (curl | bash) скачиваем репозиторий и перезапускаемся из него.
+# Запущены через curl | bash: ввод занят скриптом, а sudo и apt хотят терминал.
+# Поэтому сначала скачиваем исходники и перезапускаемся из файла с вводом с терминала.
 SELF="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR=""
 if [[ -n "$SELF" && -f "$SELF" ]]; then
@@ -47,45 +28,70 @@ fi
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/python/dictate.py" ]]; then
     if [[ "$SCRIPT_DIR" != "$(cd "$SRC" 2>/dev/null && pwd -P || true)" ]]; then
         if [[ -e "$SRC" && ! -L "$SRC" ]]; then
-            fail "$SRC уже существует и это не ссылка. Убери его или запусти установщик оттуда."
+            step "Убираю старую копию исходников в $SRC"
+            rm -rf "$SRC"
         fi
+        mkdir -p "$HOME_DIR"
         ln -sfn "$SCRIPT_DIR" "$SRC"
-        step "Исходники: $SCRIPT_DIR (ссылка $SRC)"
+        echo "Исходники: $SCRIPT_DIR (ссылка $SRC)"
     fi
 else
-    if git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
-        step "Обновляю исходники F5Voice"
-        git -C "$SRC" pull --ff-only --quiet || fail "не удалось обновить $SRC"
-    else
-        [[ -e "$SRC" ]] && fail "$SRC уже существует, но это не репозиторий. Убери его и запусти команду снова."
-        step "Скачиваю F5Voice"
-        git clone --depth 1 --quiet "$REPO_URL" "$SRC"
-    fi
-    exec bash "$SRC/install-linux.sh"
+    mkdir -p "$HOME_DIR"
+    step "Скачиваю исходники F5Voice ($TARBALL)"
+    command -v curl >/dev/null 2>&1 || fail "нет curl — поставь его (sudo apt install curl) и запусти снова"
+    TMP="$(mktemp -d)"
+    curl -fL --connect-timeout 20 --progress-bar "$TARBALL" | tar xz -C "$TMP" \
+        || fail "не удалось скачать исходники. Проверь доступ к github.com; если он закрыт, нужен VPN."
+    [[ -f "$TMP/f5voice-main/python/dictate.py" ]] || fail "архив распакован, но исходников в нём нет"
+    if [[ -L "$SRC" ]]; then rm -f "$SRC"; else rm -rf "$SRC"; fi
+    mv "$TMP/f5voice-main" "$SRC"
+    rmdir "$TMP" 2>/dev/null || true
+    echo "Исходники: $SRC"
+    if [[ -r /dev/tty ]]; then exec bash "$SRC/install-linux.sh" </dev/tty; else exec bash "$SRC/install-linux.sh"; fi
 fi
 
-step "Python-окружение"
+SUDO=""
+if [[ ${EUID:-$(id -u)} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+if command -v apt-get >/dev/null 2>&1; then
+    step "Системные пакеты через apt: python3, venv, portaudio, xclip (может спросить пароль)"
+    $SUDO apt-get install -y python3 python3-venv python3-pip libportaudio2 xclip || fail "apt-get не смог поставить пакеты"
+elif command -v dnf >/dev/null 2>&1; then
+    step "Системные пакеты через dnf: python3, portaudio, xclip (может спросить пароль)"
+    $SUDO dnf install -y python3 python3-pip portaudio xclip || fail "dnf не смог поставить пакеты"
+elif command -v pacman >/dev/null 2>&1; then
+    step "Системные пакеты через pacman: python, portaudio, xclip (может спросить пароль)"
+    $SUDO pacman -S --needed --noconfirm python python-pip portaudio xclip || fail "pacman не смог поставить пакеты"
+else
+    step "Пакетный менеджер не распознан. Нужны: python3 (3.9+) с модулем venv, libportaudio2, xclip"
+fi
+command -v python3 >/dev/null 2>&1 || fail "нет python3"
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
+    || fail "нужен Python 3.9 или новее, сейчас $(python3 --version)"
+
+step "Python-окружение в $HOME_DIR/venv"
 if [[ ! -x "$HOME_DIR/venv/bin/python" ]]; then
     python3 -m venv "$HOME_DIR/venv" || fail "не создался venv (Debian/Ubuntu: sudo apt install python3-venv)"
 fi
-"$HOME_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$HOME_DIR/venv/bin/pip" install --quiet -r "$SRC/python/requirements.txt" || fail "pip не смог поставить зависимости"
+"$HOME_DIR/venv/bin/pip" install --upgrade pip
+step "Зависимости (faster-whisper и остальное, около 200 МБ)"
+"$HOME_DIR/venv/bin/pip" install -r "$SRC/python/requirements.txt" || fail "pip не смог поставить зависимости"
 
 [[ -f "$HOME_DIR/config.json" ]] || cp "$SRC/python/config.example.json" "$HOME_DIR/config.json"
 MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('model') or 'large-v3-turbo')")"
 HOTKEY="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('hotkey') or '<ctrl>+<alt>+space')")"
 
-step "Модель $MODEL (первый раз около 1,6 ГБ)"
+step "Модель $MODEL (первый раз около 1,6 ГБ, ниже будет прогресс)"
 "$HOME_DIR/venv/bin/python" -c "from faster_whisper.utils import download_model; download_model('$MODEL')" \
     || fail "не удалось скачать модель $MODEL — проверь интернет и имя модели в $HOME_DIR/config.json"
 
 step "Проверка ядра"
-(cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest >/dev/null) \
-    || { (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest) || fail "самопроверка ядра не прошла"; }
+(cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest | tail -1) || fail "самопроверка ядра не прошла"
 
-step "Автозапуск в графической сессии"
-mkdir -p "$HOME/.config/autostart"
-cat > "$HOME/.config/autostart/f5voice.desktop" <<DESKTOP
+if [[ -z "${F5VOICE_NO_SERVICE:-}" ]]; then
+    step "Автозапуск в графической сессии"
+    mkdir -p "$HOME/.config/autostart"
+    cat > "$HOME/.config/autostart/f5voice.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=F5Voice
@@ -94,12 +100,21 @@ Exec=$HOME_DIR/venv/bin/python $SRC/python/dictate.py --log
 X-GNOME-Autostart-enabled=true
 DESKTOP
 
-step "Запуск"
-pkill -f "python/dictate.py" 2>/dev/null || true
-sleep 1
-nohup "$HOME_DIR/venv/bin/python" "$SRC/python/dictate.py" --log >/dev/null 2>&1 &
+    step "Запуск"
+    pkill -f "python/dictate.py" 2>/dev/null || true
+    sleep 1
+    nohup "$HOME_DIR/venv/bin/python" "$SRC/python/dictate.py" --log >/dev/null 2>&1 &
+    sleep 3
+    if pgrep -f "python/dictate.py" >/dev/null; then
+        echo "F5Voice работает. Первые строки лога:"
+        tail -5 "$HOME_DIR/f5voice.log" 2>/dev/null | sed 's/^/    /' || true
+    else
+        echo "F5Voice не запустился, смотри $HOME_DIR/f5voice.log:"
+        tail -20 "$HOME_DIR/f5voice.log" 2>/dev/null | sed 's/^/    /' || true
+    fi
+fi
 
-printf '\n\033[32mГотово.\033[0m F5Voice запущен и будет стартовать вместе с рабочим столом.\n'
+printf '\n\033[32mГотово.\033[0m F5Voice будет стартовать вместе с рабочим столом.\n'
 echo "  $HOTKEY — запись, ещё раз — текст в активном поле, Esc — отмена. Значок микрофона в области уведомлений."
 echo "  Настройки: $HOME_DIR/config.json (клавиша, модель, языки), лог: $HOME_DIR/f5voice.log"
 echo "  Проверка на файле: $HOME_DIR/venv/bin/python $SRC/python/dictate.py --file запись.wav"

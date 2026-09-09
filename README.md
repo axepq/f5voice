@@ -13,13 +13,15 @@
 ## Установка одной командой
 
 Для каждой системы свой установочный файл. Он сам ставит недостающее,
-создаёт отдельное окружение в `~/.f5voice` и запускает F5Voice. Заранее
-ничего ставить не нужно.
+скачивает исходники, создаёт отдельное окружение в `~/.f5voice` и запускает
+F5Voice. Заранее ничего ставить не нужно. Первая строка вывода появляется
+сразу, дальше видно каждый шаг и прогресс загрузок. Установка занимает
+несколько минут: модель распознавания весит около 1,5 ГБ.
 
 **macOS** — открой Терминал (Cmd+Space, набрать Terminal), вставь и нажми Enter:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh | bash
+bash <(curl -fsSL --connect-timeout 20 https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh)
 ```
 
 Если появится окно про Command Line Tools — нажми «Установить» и подожди,
@@ -29,27 +31,48 @@ curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh
 **Windows** — открой PowerShell (Пуск, набрать PowerShell), вставь и нажми Enter:
 
 ```
-irm https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
+irm -TimeoutSec 60 https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
 ```
+
+Если Python не установлен, поставится через winget без прав администратора.
+Сообщения установщика на английском: так он одинаково работает во всех
+версиях PowerShell.
 
 **Linux** — в терминале:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh | bash
+bash <(curl -fsSL --connect-timeout 20 https://raw.githubusercontent.com/axepq/f5voice/main/install-linux.sh)
 ```
 
-Установка занимает несколько минут: скачивается модель распознавания
-(около 1,5 ГБ) и Python-пакеты. На Windows при отсутствии Python и Git они
-ставятся через winget, на Linux пакеты ставятся через apt, dnf или pacman
-(спросит пароль). Автозапуск включается сам. На Linux и Windows клавиша по
-умолчанию Ctrl+Alt+Space, на маке F5. Повторный запуск той же команды
-обновляет установку. Удаление: `uninstall-macos.sh`, `uninstall-linux.sh`,
-`uninstall-windows.ps1` в `~/.f5voice/src`. На Linux под Wayland глобальные
-клавиши недоступны: установщик подскажет назначить сочетание рабочего стола
-на команду `dictate.py --toggle`.
+Пакеты ставятся через apt, dnf или pacman, спросит пароль. Под Wayland
+глобальные клавиши недоступны: установщик подскажет назначить сочетание
+рабочего стола на команду `dictate.py --toggle`.
 
-Те же файлы работают и из клона репозитория: `./install-macos.sh`,
-`./install-linux.sh`, `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`.
+На Linux и Windows клавиша по умолчанию Ctrl+Alt+Space, на маке F5.
+Автозапуск включается сам. Повторный запуск той же команды обновляет
+установку. Удаление: `uninstall-macos.sh`, `uninstall-linux.sh`,
+`uninstall-windows.ps1` в `~/.f5voice/src`. Те же файлы работают из клона
+репозитория: `./install-macos.sh`, `./install-linux.sh`,
+`powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`.
+
+### Если команда «висит» и ничего не пишет
+
+Значит, не скачался сам установщик: до GitHub нет доступа или он очень
+медленный. Через 20 секунд (macOS, Linux) или 60 секунд (Windows) команда
+сама прервётся с ошибкой. Проверить доступ: открыть в браузере
+https://github.com/axepq/f5voice. Если сайт закрыт, нужен VPN, или те же
+файлы через зеркало jsDelivr:
+
+```
+bash <(curl -fsSL --connect-timeout 20 https://cdn.jsdelivr.net/gh/axepq/f5voice@main/install-linux.sh)
+irm -TimeoutSec 60 https://cdn.jsdelivr.net/gh/axepq/f5voice@main/install-windows.ps1 | iex
+```
+
+Сами исходники и модель всё равно качаются с github.com и huggingface.co,
+без доступа к ним установка не пройдёт.
+
+Если установщик остановился с ошибкой, в сообщении сказано, что не так.
+Если он дошёл до конца, а диктовка не работает, смотри `~/.f5voice/f5voice.log`.
 
 ### macOS подробнее
 

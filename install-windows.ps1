@@ -1,55 +1,55 @@
-﻿# F5Voice для Windows: установка одной командой (PowerShell).
-#   irm https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
-# Можно и из клона репозитория: powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
-# Ставит Git и Python через winget (если их нет), своё Python-окружение с faster-whisper,
-# скачивает модель, добавляет ярлык в автозагрузку и запускает (без консоли, значок в трее).
+# F5Voice for Windows: one-command install (PowerShell).
+#   irm -TimeoutSec 60 https://raw.githubusercontent.com/axepq/f5voice/main/install-windows.ps1 | iex
+# From a repository clone: powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
+# Downloads the sources as a zip (no git needed), installs Python via winget if missing,
+# creates its own Python environment with faster-whisper, downloads the model, adds a
+# startup shortcut and launches F5Voice (no console window, tray icon).
+# ASCII only on purpose: Windows PowerShell 5.1 misreads UTF-8 without BOM, and a BOM breaks irm | iex.
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
-function Step($m) { Write-Host "> $m" -ForegroundColor Cyan }
-function Fail($m) { Write-Host "x $m" -ForegroundColor Red; exit 1 }
+function Step($m) { Write-Host ""; Write-Host "> $m" -ForegroundColor Cyan }
+function Fail($m) { Write-Host ""; Write-Host "x $m" -ForegroundColor Red; exit 1 }
 function Refresh-Path {
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
 }
-function Winget-Install($id, $what) {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "Нет winget. Обнови Windows (нужен App Installer из Microsoft Store) или поставь $what сам и запусти снова." }
-    Step "Ставлю $what через winget"
-    winget install -e --id $id --accept-package-agreements --accept-source-agreements | Out-Null
-    Refresh-Path
-}
 
-$RepoUrl = "https://github.com/axepq/f5voice.git"
+Write-Host "F5Voice: Windows install starting, this takes a few minutes (model download ~1.6 GB)."
+
+$Repo = "axepq/f5voice"
+$ZipUrl = "https://github.com/$Repo/archive/refs/heads/main.zip"
 $HomeDir = if ($env:F5VOICE_HOME) { $env:F5VOICE_HOME } else { Join-Path $HOME ".f5voice" }
 $Src = Join-Path $HomeDir "src"
 New-Item -ItemType Directory -Force -Path $HomeDir | Out-Null
 
-# Откуда исходники: запущены из файла внутри клона — используем его,
-# иначе (irm | iex) скачиваем репозиторий и перезапускаемся из него.
+# Sources: running from a file inside a clone -> use it; otherwise (irm | iex) download the zip.
 $ScriptPath = $MyInvocation.MyCommand.Path
 $RepoDir = if ($ScriptPath) { Split-Path -Parent $ScriptPath } else { $null }
 if ($RepoDir -and (Test-Path (Join-Path $RepoDir "python\dictate.py"))) {
-    $resolved = if (Test-Path $Src) { (Get-Item $Src).Target } else { $null }
-    if (($RepoDir -ne $Src) -and ($resolved -ne $RepoDir)) {
-        if ((Test-Path $Src) -and -not ((Get-Item $Src).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            Fail "$Src уже существует и это не ссылка. Убери его или запусти установщик оттуда."
-        }
-        if (Test-Path $Src) { (Get-Item $Src).Delete() }
+    $isLink = (Test-Path $Src) -and ((Get-Item $Src).Attributes -band [IO.FileAttributes]::ReparsePoint)
+    $target = if ($isLink) { (Get-Item $Src).Target } else { $null }
+    if (($RepoDir -ne $Src) -and ($target -ne $RepoDir)) {
+        if (Test-Path $Src) { if ($isLink) { (Get-Item $Src).Delete() } else { Remove-Item -Recurse -Force $Src } }
         New-Item -ItemType Junction -Path $Src -Target $RepoDir | Out-Null
-        Step "Исходники: $RepoDir (ссылка $Src)"
+        Write-Host "Sources: $RepoDir (linked as $Src)"
     }
 } else {
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Winget-Install "Git.Git" "Git"
-        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "Git поставлен, но не виден: открой новое окно PowerShell и запусти команду снова." }
+    Step "Downloading F5Voice sources ($ZipUrl)"
+    $Tmp = Join-Path $HomeDir "download"
+    if (Test-Path $Tmp) { Remove-Item -Recurse -Force $Tmp }
+    New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
+    $Zip = Join-Path $Tmp "f5voice.zip"
+    try { Invoke-WebRequest -Uri $ZipUrl -OutFile $Zip -TimeoutSec 120 -UseBasicParsing }
+    catch { Fail "Could not download the sources: $($_.Exception.Message). Check access to github.com (a VPN may be needed)." }
+    Expand-Archive -Path $Zip -DestinationPath $Tmp -Force
+    $Extracted = Join-Path $Tmp "f5voice-main"
+    if (-not (Test-Path (Join-Path $Extracted "python\dictate.py"))) { Fail "Archive unpacked but sources are missing" }
+    if (Test-Path $Src) {
+        if ((Get-Item $Src).Attributes -band [IO.FileAttributes]::ReparsePoint) { (Get-Item $Src).Delete() } else { Remove-Item -Recurse -Force $Src }
     }
-    if (Test-Path (Join-Path $Src ".git")) { Step "Обновляю исходники F5Voice"; git -C $Src pull --ff-only --quiet }
-    else {
-        if (Test-Path $Src) { Fail "$Src уже существует, но это не репозиторий. Убери его и запусти команду снова." }
-        Step "Скачиваю F5Voice"; git clone --depth 1 --quiet $RepoUrl $Src
-    }
-    if ($LASTEXITCODE -ne 0) { Fail "git не смог получить исходники" }
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Src "install-windows.ps1")
-    exit $LASTEXITCODE
+    Move-Item $Extracted $Src
+    Remove-Item -Recurse -Force $Tmp
+    Write-Host "Sources: $Src"
 }
 
 function Test-Python($exe) {
@@ -60,18 +60,26 @@ function Test-Python($exe) {
     return $false
 }
 $Py = $null
-foreach ($c in @("python", "python3")) { if (-not $Py -and (Test-Python $c)) { $Py = $c } }
+foreach ($c in @("python", "python3", "py")) { if (-not $Py -and (Test-Python $c)) { $Py = $c } }
 if (-not $Py) {
-    Winget-Install "Python.Python.3.12" "Python 3.12"
-    if (Test-Python "python") { $Py = "python" } else { Fail "Python поставлен, но не виден в PATH: открой новое окно PowerShell и запусти установщик снова" }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Fail "Python not found and winget is unavailable. Install Python 3.12 from python.org (check 'Add to PATH') and run again."
+    }
+    Step "Python not found - installing Python 3.12 with winget (per-user, no admin prompt)"
+    winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+    if (Test-Python "python") { $Py = "python" }
+    else { Fail "Python installed but not visible in PATH yet. Open a new PowerShell window and run the install command again." }
 }
+Write-Host "Python: $Py"
 
-Step "Python-окружение"
+Step "Python environment in $HomeDir\venv"
 $VenvPy = Join-Path $HomeDir "venv\Scripts\python.exe"
-if (-not (Test-Path $VenvPy)) { & $Py -m venv (Join-Path $HomeDir "venv"); if ($LASTEXITCODE -ne 0) { Fail "не создался venv" } }
-& $VenvPy -m pip install --quiet --upgrade pip
-& $VenvPy -m pip install --quiet -r (Join-Path $Src "python\requirements.txt")
-if ($LASTEXITCODE -ne 0) { Fail "pip не смог поставить зависимости" }
+if (-not (Test-Path $VenvPy)) { & $Py -m venv (Join-Path $HomeDir "venv"); if ($LASTEXITCODE -ne 0) { Fail "could not create venv" } }
+& $VenvPy -m pip install --upgrade pip
+Step "Dependencies (faster-whisper and friends, ~200 MB)"
+& $VenvPy -m pip install -r (Join-Path $Src "python\requirements.txt")
+if ($LASTEXITCODE -ne 0) { Fail "pip could not install dependencies" }
 
 $Config = Join-Path $HomeDir "config.json"
 if (-not (Test-Path $Config)) { Copy-Item (Join-Path $Src "python\config.example.json") $Config }
@@ -79,37 +87,42 @@ $Cfg = Get-Content $Config -Raw -Encoding UTF8 | ConvertFrom-Json
 $Model = if ($Cfg.model) { $Cfg.model } else { "large-v3-turbo" }
 $Hotkey = if ($Cfg.hotkey) { $Cfg.hotkey } else { "<ctrl>+<alt>+space" }
 
-Step "Модель $Model (первый раз около 1,6 ГБ)"
+Step "Model $Model (first time ~1.6 GB, progress below)"
 & $VenvPy -c "from faster_whisper.utils import download_model; download_model('$Model')"
-if ($LASTEXITCODE -ne 0) { Fail "не удалось скачать модель $Model - проверь интернет и имя модели в $Config" }
+if ($LASTEXITCODE -ne 0) { Fail "could not download model $Model - check internet and the model name in $Config" }
 
-Step "Проверка ядра"
+Step "Core self-test"
 Push-Location $Src
-& $VenvPy -m common.selftest | Out-Null
+& $VenvPy -m common.selftest | Select-Object -Last 1
 $selftest = $LASTEXITCODE
 Pop-Location
-if ($selftest -ne 0) { Fail "самопроверка ядра не прошла: cd $Src; $VenvPy -m common.selftest" }
+if ($selftest -ne 0) { Fail "core self-test failed: cd $Src; $VenvPy -m common.selftest" }
 
-Step "Автозагрузка"
-$Startup = [Environment]::GetFolderPath("Startup")
-$PythonW = Join-Path $HomeDir "venv\Scripts\pythonw.exe"
-$Script = Join-Path $Src "python\dictate.py"
-$Shell = New-Object -ComObject WScript.Shell
-$Lnk = $Shell.CreateShortcut((Join-Path $Startup "F5Voice.lnk"))
-$Lnk.TargetPath = $PythonW
-$Lnk.Arguments = "`"$Script`" --log"
-$Lnk.WorkingDirectory = $HomeDir
-$Lnk.Description = "F5Voice: локальная диктовка"
-$Lnk.Save()
+if (-not $env:F5VOICE_NO_SERVICE) {
+    Step "Startup shortcut"
+    $Startup = [Environment]::GetFolderPath("Startup")
+    $PythonW = Join-Path $HomeDir "venv\Scripts\pythonw.exe"
+    $Script = Join-Path $Src "python\dictate.py"
+    $Shell = New-Object -ComObject WScript.Shell
+    $Lnk = $Shell.CreateShortcut((Join-Path $Startup "F5Voice.lnk"))
+    $Lnk.TargetPath = $PythonW
+    $Lnk.Arguments = "`"$Script`" --log"
+    $Lnk.WorkingDirectory = $HomeDir
+    $Lnk.Description = "F5Voice: local dictation"
+    $Lnk.Save()
 
-Step "Запуск"
-Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -like "*python\dictate.py*" } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Start-Process -FilePath $PythonW -ArgumentList "`"$Script`" --log" -WorkingDirectory $HomeDir
+    Step "Launching"
+    Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
+        Where-Object { $_.CommandLine -like "*python\dictate.py*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Process -FilePath $PythonW -ArgumentList "`"$Script`" --log" -WorkingDirectory $HomeDir
+    Start-Sleep -Seconds 4
+    $Log = Join-Path $HomeDir "f5voice.log"
+    if (Test-Path $Log) { Write-Host "Log tail:"; Get-Content $Log -Tail 5 -Encoding UTF8 | ForEach-Object { "    $_" } }
+}
 
 Write-Host ""
-Write-Host "Готово. F5Voice запущен и будет стартовать при входе в Windows." -ForegroundColor Green
-Write-Host "  $Hotkey - запись, ещё раз - текст в активном поле, Esc - отмена. Значок микрофона в области уведомлений."
-Write-Host "  Настройки: $Config (клавиша, модель, языки), лог: $(Join-Path $HomeDir 'f5voice.log')"
-Write-Host "  Видеокарта NVIDIA: в config.json device=cuda, compute_type=float16 (нужны CUDA 12 и cuDNN 9)."
+Write-Host "Done. F5Voice is running and will start with Windows." -ForegroundColor Green
+Write-Host "  $Hotkey - record, press again - text is typed into the active field, Esc - cancel. Microphone icon in the tray."
+Write-Host "  Settings: $Config (hotkey, model, languages). Log: $(Join-Path $HomeDir 'f5voice.log')"
+Write-Host "  NVIDIA GPU: set device=cuda and compute_type=float16 in config.json (needs CUDA 12 + cuDNN 9)."
