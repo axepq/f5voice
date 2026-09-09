@@ -83,7 +83,7 @@ MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME
 HOTKEY="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('hotkey') or '<ctrl>+<alt>+space')")"
 
 step "Модель $MODEL (первый раз около 1,6 ГБ, ниже будет прогресс)"
-"$HOME_DIR/venv/bin/python" -c "from faster_whisper.utils import download_model; download_model('$MODEL')" \
+PYTHONWARNINGS=ignore "$HOME_DIR/venv/bin/python" "$SRC/python/download_model.py" "$MODEL" \
     || fail "не удалось скачать модель $MODEL — проверь интернет и имя модели в $HOME_DIR/config.json"
 
 step "Проверка ядра"

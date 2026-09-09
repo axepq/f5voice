@@ -88,8 +88,11 @@ $Model = if ($Cfg.model) { $Cfg.model } else { "large-v3-turbo" }
 $Hotkey = if ($Cfg.hotkey) { $Cfg.hotkey } else { "<ctrl>+<alt>+space" }
 
 Step "Model $Model (first time ~1.6 GB, progress below)"
-& $VenvPy -c "from faster_whisper.utils import download_model; download_model('$Model')"
-if ($LASTEXITCODE -ne 0) { Fail "could not download model $Model - check internet and the model name in $Config" }
+$env:PYTHONWARNINGS = "ignore"
+& $VenvPy (Join-Path $Src "python\download_model.py") $Model
+$dl = $LASTEXITCODE
+Remove-Item Env:\PYTHONWARNINGS -ErrorAction SilentlyContinue
+if ($dl -ne 0) { Fail "could not download model $Model - check internet and the model name in $Config" }
 
 Step "Core self-test"
 Push-Location $Src
