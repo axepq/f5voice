@@ -5,4 +5,4 @@ numpy
 pyperclip
 pystray
 Pillow
-setuptools
+setuptools<80

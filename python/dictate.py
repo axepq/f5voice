@@ -42,6 +42,7 @@ _utf8_console()
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common.audio_io import load_audio, resample  # noqa: E402
 from common.segments import assemble  # noqa: E402
@@ -177,9 +178,9 @@ def _probe(model, device, compute_type, timeout=900):
 
 def model_files(model):
     """(репозиторий, каталог snapshot в кэше или None)."""
-    from faster_whisper.utils import _MODELS
+    from download_model import resolve_repo
 
-    repo = _MODELS.get(model, model)
+    repo = resolve_repo(model)
     root = Path(os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface") / "hub")
     if os.environ.get("HF_HUB_CACHE") is None and os.environ.get("HF_HOME"):
         root = Path(os.environ["HF_HOME"]) / "hub"
@@ -219,15 +220,15 @@ def redownload_model(model):
     """Удаляет кэш модели и качает заново классическим способом."""
     import shutil
 
-    from faster_whisper.utils import _MODELS
+    from download_model import FILES, resolve_repo
     from huggingface_hub import snapshot_download
 
-    repo = _MODELS.get(model, model)
+    repo = resolve_repo(model)
     _, snap = model_files(model)
     if snap is not None:
         shutil.rmtree(snap.parent.parent, ignore_errors=True)
     os.environ["HF_HUB_DISABLE_XET"] = "1"
-    snapshot_download(repo, allow_patterns=["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"])
+    snapshot_download(repo, allow_patterns=FILES)
 
 
 def resolve_backend(cfg):
@@ -278,9 +279,9 @@ def resolve_backend(cfg):
         if not ok_tiny:
             version = fallback_versions[attempt]
             log(f"даже крошечная модель не грузится ({detail}) — ставлю CTranslate2 {version} "
-                f"(с setuptools: старым версиям нужен pkg_resources)")
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", f"ctranslate2=={version}", "setuptools"],
-                           check=False)
+                f"(и setuptools<80: старым версиям нужен pkg_resources)")
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", f"ctranslate2=={version}", "setuptools<80"],
+                           check=False)  # в setuptools 80+ pkg_resources убран
         elif not ok_files:
             log("крошечная модель работает — большая, похоже, повреждена, скачиваю заново")
             redownload_model(model)
