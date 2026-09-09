@@ -111,9 +111,24 @@ if [[ -z "${F5VOICE_NO_SERVICE:-}" ]]; then
 Type=Application
 Name=F5Voice
 Comment=Локальная диктовка по горячей клавише
-Exec=$HOME_DIR/venv/bin/python $SRC/python/dictate.py --log
+Exec=$HOME_DIR/venv/bin/python $SRC/python/dictate.py --service --log
+Icon=$SRC/python/F5Voice.png
 X-GNOME-Autostart-enabled=true
 DESKTOP
+
+    step "F5Voice в меню приложений (открывает окно программы)"
+    mkdir -p "$HOME/.local/share/applications"
+    cat > "$HOME/.local/share/applications/f5voice.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=F5Voice
+Comment=Локальная диктовка по горячей клавише: окно настроек
+Exec=$HOME_DIR/venv/bin/python $SRC/python/dictate.py --log
+Icon=$SRC/python/F5Voice.png
+Terminal=false
+Categories=Utility;AudioVideo;
+DESKTOP
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
     step "Запуск"
     pkill -f "python/dictate.py" 2>/dev/null || true
@@ -135,7 +150,8 @@ fi
 
 printf '\n\033[32mГотово.\033[0m F5Voice будет стартовать вместе с рабочим столом.\n'
 echo "  $HOTKEY — запись, ещё раз — текст в активном поле, Esc — отмена. Значок микрофона в области уведомлений."
-echo "  Настройки: $HOME_DIR/config.json (клавиша, модель, языки), лог: $HOME_DIR/f5voice.log"
+echo "  Окно программы (клавиша, стиль, модель, автозапуск): F5Voice в меню приложений или значок → «Настройки…»."
+echo "  Файл настроек: $HOME_DIR/config.json, лог: $HOME_DIR/f5voice.log"
 echo "  Проверка на файле: $HOME_DIR/venv/bin/python $SRC/python/dictate.py --file запись.wav"
 if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
     printf '\n\033[33mWayland:\033[0m глобальные клавиши через pynput не работают. В настройках рабочего стола назначь сочетание на команду:\n'

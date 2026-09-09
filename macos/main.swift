@@ -10,6 +10,8 @@
 //   3. Звук пишется в ~/.f5voice/last.wav (16 кГц, моно), путь уходит воркеру
 //      worker.py, который держит модель whisper в памяти и отвечает текстом.
 //   4. Текст печатается в активное поле как обычный ввод с клавиатуры.
+//   5. Окно программы (settings.swift) открывается двойным щелчком по F5Voice.app, из меню
+//      в строке состояния и командой open -a F5Voice; служба запускается с --service без окна.
 //
 // Сборка: macos/build.sh   Настройки: ~/.f5voice/config.json   Лог: ~/.f5voice/f5voice.log
 
@@ -30,6 +32,10 @@ let cancelCode: Int64 = 53                 // Esc
 let spareKeyCode: CGKeyCode = 64           // F17: сюда hidutil переводит выбранную F-клавишу
 let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клавиатуры
 let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
+let isService = CommandLine.arguments.contains("--service")  // запущены службой launchd, а не вручную
+let openNote = Notification.Name("com.alex.f5voice.open")       // «покажи окно» от повторного запуска
+let quitNote = Notification.Name("com.alex.f5voice.quit")       // «уступи место службе» ручному экземпляру
+var tookOver = false                                            // служба заменила ручной экземпляр
 
 struct Config {
     var hotkey = "F5"
@@ -713,6 +719,7 @@ final class App: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotkeyItem: NSMenuItem!
     private lazy var hud = HUD(style: config.style)
+    private var settings: SettingsWindow?
     var capturing = false
     private let recorder = Recorder()
     private lazy var worker = Worker(config: config)
@@ -744,6 +751,37 @@ final class App: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self = self else { return }
             applyRemap(fKey: self.hotkey.fKey, on: true)
+        }
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(forName: openNote, object: nil, queue: .main) { [weak self] _ in self?.showSettings() }
+        center.addObserver(forName: quitNote, object: nil, queue: .main) { [weak self] _ in
+            guard !isService else { return }
+            log("служба F5Voice запустилась — ручной экземпляр уступает ей место")
+            self?.terminate()
+        }
+        if !isService || tookOver { showSettings() }  // открыли приложение руками — покажем окно
+    }
+
+    /// Двойной щелчок по F5Voice.app или open -a F5Voice, когда программа уже работает.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return false
+    }
+
+    @objc func showSettings() {
+        if settings == nil { settings = SettingsWindow(app: self) }
+        settings?.show()
+    }
+
+    func statusText() -> String {
+        if !accessibilityOK { return "Нужно разрешение «Универсальный доступ» — кнопка ниже. Без него \(hotkey.title) не работает." }
+        if !micOK { return "Нет доступа к микрофону — кнопка ниже." }
+        switch state {
+        case .recording: return "Запись…   \(hotkey.title) — готово, Esc — отмена"
+        case .transcribing: return "Распознаю…"
+        case .idle:
+            return (worker.isReady ? "Готов" : "Загружаю модель…") + "   \(hotkey.title) — диктовка, ещё раз — готово, Esc — отмена"
+                + "\nМодель \(config.model)"
         }
     }
 
@@ -787,28 +825,23 @@ final class App: NSObject, NSApplicationDelegate {
             worker.stop(reason: "настройки изменились")
             worker.start()
         }
+        settings?.refresh()
         hud.show("Настройки перечитаны: \(hotkey.title)", symbol: "checkmark.circle.fill", tint: .systemGreen, hideAfter: 3)
         log("настройки перечитаны")
     }
 
-    @objc private func pickHotkey(_ sender: NSMenuItem) {
-        guard let spec = sender.representedObject as? String else { return }
-        Config.save(["hotkey": spec])
+    /// Записать ключи в config.json и применить (окно настроек).
+    func apply(_ updates: [String: Any]) {
+        Config.save(updates)
         reloadConfig()
     }
 
-    @objc private func pickStyle(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        Config.save(["style": name])
-        reloadConfig()
+    func previewHUD() {
+        let title = styleNames.first { $0.0 == config.style }?.1 ?? config.style
+        hud.show("Так выглядит плашка: \(title)", symbol: "sparkles", bars: .wave, animate: .variableColor, hideAfter: 3)
     }
 
-    @objc private func toggleTrailingSpace() {
-        Config.save(["trailing_space": !config.trailingSpace])
-        reloadConfig()
-    }
-
-    @objc private func captureHotkey() {
+    @objc func captureHotkey() {
         capturing = true
         hud.show("Нажмите новое сочетание клавиш… Esc — отмена", symbol: "keyboard", tint: .systemYellow)
     }
@@ -836,7 +869,7 @@ final class App: NSObject, NSApplicationDelegate {
         reloadConfig()
     }
 
-    @objc private func openConfig() {
+    @objc func openConfig() {
         if !FileManager.default.fileExists(atPath: configPath) {
             let example = homeDir + "/src/macos/config.example.json"
             try? FileManager.default.copyItem(atPath: example, toPath: configPath)
@@ -927,42 +960,8 @@ final class App: NSObject, NSApplicationDelegate {
         menu.addItem(hotkeyItem)
         menu.addItem(NSMenuItem(title: "Начать / остановить запись", action: #selector(menuToggle), keyEquivalent: ""))
         menu.addItem(.separator())
-        let settings = NSMenu()
-        let keys = NSMenu()
-        for spec in ["F5", "F6", "F13", "F19", "cmd+shift+space", "ctrl+alt+space", "ctrl+alt+d"] {
-            let item = NSMenuItem(title: HotKey.parse(spec)?.title ?? spec, action: #selector(pickHotkey(_:)), keyEquivalent: "")
-            item.representedObject = spec
-            item.state = spec.lowercased() == config.hotkey.lowercased() ? .on : .off
-            keys.addItem(item)
-        }
-        keys.addItem(.separator())
-        keys.addItem(NSMenuItem(title: "Записать новое сочетание…", action: #selector(captureHotkey), keyEquivalent: ""))
-        let keysItem = NSMenuItem(title: "Сочетание клавиш", action: nil, keyEquivalent: "")
-        keysItem.submenu = keys
-        settings.addItem(keysItem)
-        let styles = NSMenu()
-        for (name, title) in [("glass", "Liquid Glass"), ("metal", "Liquid Metal"), ("clear", "Прозрачное стекло"), ("dark", "Тёмная")] {
-            let item = NSMenuItem(title: title, action: #selector(pickStyle(_:)), keyEquivalent: "")
-            item.representedObject = name
-            item.state = name == config.style ? .on : .off
-            styles.addItem(item)
-        }
-        let stylesItem = NSMenuItem(title: "Стиль плашки", action: nil, keyEquivalent: "")
-        stylesItem.submenu = styles
-        settings.addItem(stylesItem)
-        let space = NSMenuItem(title: "Пробел после надиктованного", action: #selector(toggleTrailingSpace), keyEquivalent: "")
-        space.state = config.trailingSpace ? .on : .off
-        settings.addItem(space)
-        settings.addItem(.separator())
-        settings.addItem(NSMenuItem(title: "Открыть config.json…", action: #selector(openConfig), keyEquivalent: ","))
-        settings.addItem(NSMenuItem(title: "Перечитать настройки", action: #selector(reloadConfig), keyEquivalent: "r"))
-        for item in keys.items + styles.items + settings.items { item.target = self }
-        let settingsItem = NSMenuItem(title: "Настройки", action: nil, keyEquivalent: "")
-        settingsItem.submenu = settings
-        menu.addItem(settingsItem)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Разрешение: Универсальный доступ…", action: #selector(openAccessibility), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Разрешение: Микрофон…", action: #selector(openMicrophone), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Настройки F5Voice…", action: #selector(showSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Перечитать config.json", action: #selector(reloadConfig), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Показать лог", action: #selector(openLog), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Выключить до следующего входа (клавиша вернётся системе)", action: #selector(quit), keyEquivalent: "q"))
@@ -1000,14 +999,6 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @objc private func menuToggle() { toggle() }
-
-    @objc private func openAccessibility() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-    }
-
-    @objc private func openMicrophone() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
-    }
 
     @objc private func openLog() {
         NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
@@ -1228,6 +1219,28 @@ if CommandLine.arguments.contains("--check") {
     print("воркер: \(workerScript) — \(FileManager.default.fileExists(atPath: workerScript) ? "есть" : "НЕТ")")
     print("python: \(python) — \(FileManager.default.isExecutableFile(atPath: python) ? "есть" : "НЕТ")")
     exit(0)
+}
+
+// Один экземпляр. Повторный запуск (двойной щелчок по F5Voice.app, open -a F5Voice) открывает окно
+// уже работающего; служба (--service), наоборот, вытесняет запущенный вручную экземпляр.
+let bundleID = Bundle.main.bundleIdentifier ?? launchdLabel
+let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).filter { $0.processIdentifier != getpid() }
+if !others.isEmpty {
+    let center = DistributedNotificationCenter.default()
+    if isService {
+        center.postNotificationName(quitNote, object: nil, userInfo: nil, deliverImmediately: true)
+        var waited = 0
+        while waited < 50, others.contains(where: { kill($0.processIdentifier, 0) == 0 }) {
+            usleep(100_000)
+            waited += 1
+        }
+        for other in others where kill(other.processIdentifier, 0) == 0 { other.forceTerminate() }
+        tookOver = true
+        log("служба заменила запущенный вручную экземпляр (pid \(others.map { String($0.processIdentifier) }.joined(separator: ", ")))")
+    } else {
+        center.postNotificationName(openNote, object: nil, userInfo: nil, deliverImmediately: true)
+        exit(0)
+    }
 }
 
 let application = NSApplication.shared

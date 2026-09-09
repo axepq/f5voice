@@ -6,7 +6,8 @@
 	<string>com.alex.f5voice</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>@HOME_DIR@/F5Voice.app/Contents/MacOS/F5Voice</string>
+		<string>@APP@/Contents/MacOS/F5Voice</string>
+		<string>--service</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>

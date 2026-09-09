@@ -6,6 +6,7 @@
 Модель — faster-whisper (CTranslate2), на CPU или CUDA.
 
 Запуск:            python python/dictate.py            (в фоне: --log, вывод в ~/.f5voice/f5voice.log)
+                   повторный запуск открывает окно уже работающей программы; --service — без окна (автозапуск)
 Переключить извне: python python/dictate.py --toggle   (для сочетаний клавиш рабочего стола, Wayland)
 Проверка на файле: python python/dictate.py --file запись.wav
 Устройства ввода:  python python/dictate.py --list-devices
@@ -17,7 +18,6 @@
 import argparse
 import collections
 import ctypes
-import glob
 import json
 import math
 import os
@@ -51,6 +51,8 @@ from common.audio_io import load_audio, resample  # noqa: E402
 from common.segments import assemble  # noqa: E402
 from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
 from common.vad import is_silence  # noqa: E402
+
+import control  # noqa: E402  (python/control.py: единственный экземпляр, --toggle, окно по ярлыку)
 
 RATE = 16000
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")              # классическая загрузка вместо hf_xet
@@ -574,12 +576,12 @@ class HUD(threading.Thread):
         "dark": ("#0d0d10", "#ffffff", True),
     }
 
-    def __init__(self, level_fn, style="glass", on_settings_saved=None, cfg=None):
+    def __init__(self, app, level_fn, style="glass"):
         super().__init__(daemon=True)
+        self.app = app
         self.level_fn = level_fn
         self.style = style if style in self.STYLES else "glass"
-        self.on_settings_saved = on_settings_saved
-        self.cfg = cfg or {}
+        self.settings_win = None
         self.q = queue.Queue()
         self.state = None
         self.text = ""
@@ -697,33 +699,78 @@ class HUD(threading.Thread):
             x += 70
         c.create_text(x, cy, text=self.text, anchor="w", fill=self.fg, font=("Segoe UI", 12))
 
+    def _logo(self, tk):
+        """Иконка 48 px для шапки окна (PNG рядом со скриптом), без Pillow."""
+        try:
+            img = tk.PhotoImage(file=str(Path(__file__).resolve().parent / "F5Voice.png"))
+            return img.subsample(max(1, img.width() // 48))
+        except tk.TclError:
+            return None
+
     def _settings_window(self):
-        """Окно настроек: сочетание (можно записать нажатием), стиль, языки, модель, пробел, перенос."""
-        tk = self.tk if hasattr(self, "tk") else __import__("tkinter")
+        """Окно программы: состояние, сочетание (можно записать нажатием), стиль, языки, модель,
+        перенос строки, пробел, автозапуск. Окно одно: повторный вызов поднимает его."""
+        tk = self.tk
         from tkinter import ttk
 
+        app = self.app
+        if self.settings_win is not None:
+            try:
+                if self.settings_win.winfo_exists():
+                    self.settings_win.deiconify()
+                    self.settings_win.lift()
+                    self.settings_win.focus_force()
+                    return
+            except tk.TclError:
+                pass
         win = tk.Toplevel(self.root)
-        win.title("F5Voice — настройки")
-        win.attributes("-topmost", True)
+        self.settings_win = win
+        win.title("F5Voice")
         win.resizable(False, False)
-        cfg = self.cfg
+        try:
+            if IS_WINDOWS:
+                win.iconbitmap(str(Path(__file__).resolve().parent / "F5Voice.ico"))
+            self._icon_photo = tk.PhotoImage(file=str(Path(__file__).resolve().parent / "F5Voice.png"))
+            win.iconphoto(False, self._icon_photo)
+        except tk.TclError:
+            pass
+        frame = ttk.Frame(win, padding=(18, 14, 18, 14))
+        frame.grid(sticky="nsew")
+
+        head = ttk.Frame(frame)
+        head.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
+        self._logo_photo = self._logo(tk)
+        if self._logo_photo:
+            ttk.Label(head, image=self._logo_photo).grid(row=0, column=0, rowspan=2, padx=(0, 12))
+        ttk.Label(head, text="F5Voice", font=("Segoe UI", 16, "bold")).grid(row=0, column=1, sticky="w")
+        status = ttk.Label(head, text=app.status_text(), foreground="#666", justify="left")
+        status.grid(row=1, column=1, sticky="w")
+
+        cfg = dict(app.cfg)
         rows = [("Сочетание клавиш", "hotkey", None), ("Стиль плашки", "style", list(self.STYLES)),
                 ("Языки (первый — основной)", "languages", None),
                 ("Модель", "model", ["large-v3-turbo", "medium", "small"]),
                 ("Перенос строки клавишей", "newline", ["shift+enter", "enter", "ctrl+enter"])]
         vars_ = {}
-        for i, (label, key, options) in enumerate(rows):
-            ttk.Label(win, text=label).grid(row=i, column=0, sticky="w", padx=10, pady=4)
-            v = tk.StringVar(value=str(cfg.get(key, "")))
+        for i, (label, key, options) in enumerate(rows, start=1):
+            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=4, padx=(0, 12))
+            value = pretty_hotkey(normalize_hotkey(cfg.get(key) or "")) if key == "hotkey" else str(cfg.get(key, ""))
+            v = tk.StringVar(value=value)
             vars_[key] = v
             if options:
-                ttk.Combobox(win, textvariable=v, values=options, width=28).grid(row=i, column=1, padx=10, pady=4)
+                ttk.Combobox(frame, textvariable=v, values=options, width=28).grid(row=i, column=1, pady=4, sticky="w")
             else:
-                ttk.Entry(win, textvariable=v, width=31).grid(row=i, column=1, padx=10, pady=4)
+                ttk.Entry(frame, textvariable=v, width=31).grid(row=i, column=1, pady=4, sticky="w")
+        row = len(rows) + 1
         trailing = tk.BooleanVar(value=bool(cfg.get("trailing_space", True)))
-        ttk.Checkbutton(win, text="Пробел после надиктованного", variable=trailing).grid(row=len(rows), column=0, columnspan=2, sticky="w", padx=10)
-        hint = ttk.Label(win, text="Нажмите «Записать» и сочетание на клавиатуре, например Ctrl+Alt+D", foreground="#666")
-        hint.grid(row=len(rows) + 1, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Checkbutton(frame, text="Пробел после надиктованного", variable=trailing).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        autostart = tk.BooleanVar(value=autostart_enabled())
+        ttk.Checkbutton(frame, text="Запускать при входе в систему", variable=autostart).grid(
+            row=row + 1, column=0, columnspan=3, sticky="w")
+        hint = ttk.Label(frame, text="«Записать» — нажать нужное сочетание на клавиатуре, например Ctrl+Alt+D",
+                         foreground="#666")
+        hint.grid(row=row + 2, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         def record():
             from pynput import keyboard
@@ -733,8 +780,7 @@ class HUD(threading.Thread):
 
             def name(k):
                 if isinstance(k, keyboard.Key):
-                    n = k.name.replace("_l", "").replace("_r", "").replace("cmd", "win")
-                    return n
+                    return k.name.replace("_l", "").replace("_r", "").replace("cmd", "win")
                 return (getattr(k, "char", None) or "").lower() or None
 
             def on_press(k):
@@ -750,20 +796,89 @@ class HUD(threading.Thread):
 
             keyboard.Listener(on_press=on_press).start()
 
-        ttk.Button(win, text="Записать", command=record).grid(row=0, column=2, padx=6)
+        ttk.Button(frame, text="Записать", command=record).grid(row=1, column=2, padx=(6, 0))
 
         def save():
             for key, v in vars_.items():
                 cfg[key] = v.get().strip()
             cfg["trailing_space"] = bool(trailing.get())
-            if cfg.get("model") != self.cfg.get("model"):
+            if cfg.get("model") != app.cfg.get("model"):
                 cfg.pop("backend_checked", None)
-            save_config(cfg)
+            if autostart.get() != autostart_enabled() and not set_autostart(autostart.get()):
+                hint.configure(text="Не удалось изменить автозапуск — подробности в логе")
+            app.cfg.clear()
+            app.cfg.update(cfg)
+            save_config(app.cfg)
             win.destroy()
-            if self.on_settings_saved:
-                self.on_settings_saved()
+            app.restart()
 
-        ttk.Button(win, text="Сохранить и перезапустить", command=save).grid(row=len(rows) + 2, column=0, columnspan=3, pady=10)
+        bar = ttk.Frame(frame)
+        bar.grid(row=row + 3, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        ttk.Button(bar, text="Проверить: запись", command=app.toggle).pack(side="left")
+        ttk.Button(bar, text="Лог", command=lambda: open_path(LOG_PATH)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Сохранить и перезапустить", command=save).pack(side="right")
+        ttk.Button(bar, text="Закрыть", command=win.destroy).pack(side="right", padx=6)
+
+        def tick():
+            try:
+                if not win.winfo_exists():
+                    return
+                status.configure(text=app.status_text())
+                win.after(1000, tick)
+            except tk.TclError:
+                pass
+
+        tick()
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        win.geometry(f"+{(win.winfo_screenwidth() - w) // 2}+{(win.winfo_screenheight() - h) // 3}")
+        win.attributes("-topmost", True)
+        win.lift()
+        win.focus_force()
+        win.after(500, lambda: win.attributes("-topmost", False))
+
+
+def autostart_path():
+    if IS_WINDOWS:
+        appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        return appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "F5Voice.lnk"
+    return Path.home() / ".config" / "autostart" / "f5voice.desktop"
+
+
+def autostart_enabled():
+    return autostart_path().exists()
+
+
+def set_autostart(on):
+    """Windows — ярлык в папке «Автозагрузка», Linux — файл в ~/.config/autostart. True, если получилось."""
+    path = autostart_path()
+    try:
+        if not on:
+            path.unlink(missing_ok=True)
+            return True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        script = os.path.abspath(__file__)
+        here = Path(__file__).resolve().parent
+        if IS_WINDOWS:
+            exe = sys.executable
+            if exe.lower().endswith("python.exe"):
+                exe = exe[:-10] + "pythonw.exe"
+            q = lambda x: str(x).replace("'", "''")  # noqa: E731
+            ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{q(path)}');"
+                  f"$s.TargetPath='{q(exe)}';$s.Arguments='\"{q(script)}\" --service --log';"
+                  f"$s.WorkingDirectory='{q(HOME)}';$s.IconLocation='{q(here / 'F5Voice.ico')},0';$s.Save()")
+            r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                               capture_output=True, text=True, creationflags=0x08000000)
+            if r.returncode != 0:
+                log(f"! ярлык автозапуска не создан: {r.stderr.strip()[:200]}")
+            return path.exists()
+        path.write_text("[Desktop Entry]\nType=Application\nName=F5Voice\nComment=Локальная диктовка по горячей клавише\n"
+                        f"Exec={sys.executable} {script} --service --log\nIcon={here / 'F5Voice.png'}\n"
+                        "X-GNOME-Autostart-enabled=true\n", encoding="utf-8")
+        return True
+    except OSError as e:
+        log(f"! автозапуск: {e}")
+        return False
 
 
 def pretty_hotkey(normalized):
@@ -785,7 +900,7 @@ class Tray:
         self.app = app
         menu = pystray.Menu(
             pystray.MenuItem("Запись / стоп", lambda: app.toggle()),
-            pystray.MenuItem("Настройки…", lambda: app.hud.open_settings() if app.hud else open_path(CONFIG_PATH)),
+            pystray.MenuItem("Настройки…", lambda: app.open_settings(), default=True),
             pystray.MenuItem("Файл настроек (config.json)", lambda: open_path(CONFIG_PATH)),
             pystray.MenuItem("Лог", lambda: open_path(LOG_PATH)),
             pystray.MenuItem("Выход", lambda: app.quit()),
@@ -829,14 +944,17 @@ def open_path(path):
 # ---------------------------------------------------------------- приложение
 
 class App:
-    def __init__(self, cfg):
+    def __init__(self, cfg, show_window=False):
         self.cfg = cfg
         self.state = "idle"
+        self.ready = False
+        self.show_window = show_window
         self.lock = threading.Lock()
         self.tray = None
         self.hotkeys = None
         self.esc_listener = None
         self.hud = None
+        self.control = control.ControlServer(self._on_control, HOME).start()  # до модели: ярлык отвечает сразу
         log(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер, {platform.processor() or '?'}")
         try:
             self.recorder = Recorder(cfg["input_device"])
@@ -845,7 +963,7 @@ class App:
             log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
                 "выбрать: \"input_device\" в config.json")
             sys.exit(1)
-        self.hud = HUD(lambda: self.recorder.level, cfg.get("style", "glass"), self.restart, cfg) if cfg.get("hud", True) else None
+        self.hud = HUD(self, lambda: self.recorder.level, cfg.get("style", "glass")) if cfg.get("hud", True) else None
         self.hotkey_title = pretty_hotkey(normalize_hotkey(cfg["hotkey"]))
         self.recognizer = Recognizer(cfg)
         self.typist = Typist(cfg)
@@ -863,6 +981,34 @@ class App:
     def _show(self, state, text, ttl=None):
         if self.hud:
             self.hud.show(state, text, ttl)
+
+    def _on_control(self, cmd):
+        """Команда от второго запуска, --toggle/--cancel/--settings или ярлыка."""
+        if cmd == "toggle":
+            if self.ready:
+                self.toggle()
+            else:
+                self._show("info", "Ещё загружаю модель…", 2)
+        elif cmd == "cancel":
+            self.cancel()
+        elif cmd == "settings":
+            self.open_settings()
+        elif cmd == "quit":
+            threading.Timer(0.2, self.quit).start()
+        return "ok"
+
+    def open_settings(self):
+        if self.hud:
+            self.hud.open_settings()
+        else:
+            open_path(CONFIG_PATH)
+
+    def status_text(self):
+        if not self.ready:
+            return "Загружаю модель…"
+        state = {"recording": "Запись…", "transcribing": "Распознаю…"}.get(self.state, "Готов")
+        dev = {"cuda": "на видеокарте", "cpu": "на процессоре"}.get(self.cfg.get("device"), "")
+        return f"{state} · {self.hotkey_title} — диктовка, Esc — отмена\nМодель {self.cfg['model']} {dev}".rstrip()
 
     def toggle(self):
         with self.lock:
@@ -939,6 +1085,7 @@ class App:
     def restart(self):
         """После смены настроек: новый экземпляр с --log, этот выходит."""
         log("перезапуск с новыми настройками")
+        self.control.stop()  # иначе новый экземпляр решит, что мы ещё работаем, и просто откроет окно
         exe = sys.executable
         if IS_WINDOWS and exe.lower().endswith("python.exe"):
             exe = exe[:-10] + "pythonw.exe"
@@ -951,6 +1098,7 @@ class App:
             self.hotkeys.stop()
         if self.tray:
             self.tray.stop()
+        self.control.stop()
         PID_PATH.unlink(missing_ok=True)
         os._exit(0)
 
@@ -994,7 +1142,10 @@ class App:
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":
             log("Wayland: глобальные клавиши через pynput не работают. Назначь в настройках рабочего стола "
                 "сочетание на команду «python python/dictate.py --toggle».")
-        if self.tray:
+        self.ready = True
+        if self.show_window:  # запуск по ярлыку, не автозапуск: показать окно программы
+            self.open_settings()
+        elif self.tray:
             try:  # Windows прячет новые значки за стрелкой — скажем, что мы работаем
                 self.tray.icon.notify(f"Готов. {self.cfg['hotkey']} — диктовка, Esc — отмена.", "F5Voice")
             except Exception:  # noqa: BLE001
@@ -1026,18 +1177,17 @@ class App:
 
 # ---------------------------------------------------------------- команды запуска
 
-def send_signal(name):
-    """--toggle / --cancel: сообщить работающему экземпляру."""
-    if IS_WINDOWS:
-        print("на Windows используй горячую клавишу или значок в трее")
-        return 1
-    try:
-        pid = int(PID_PATH.read_text(encoding="utf-8"))
-        os.kill(pid, getattr(signal, name))
-        return 0
-    except (FileNotFoundError, ValueError, ProcessLookupError):
-        print("F5Voice не запущен: python python/dictate.py --log &")
-        return 1
+def startup_action(args, running):
+    """Что делать при запуске, если другой экземпляр уже работает (running) или нет:
+    ("send", команда) — передать ему и выйти; ("exit", None) — тихо выйти (автозапуск при
+    работающей программе); ("start", показать_окно) — запуститься самим."""
+    if args.toggle:
+        return ("send", "toggle")
+    if args.cancel:
+        return ("send", "cancel")
+    if running:
+        return ("exit", None) if args.service else ("send", "settings")
+    return ("start", not args.service)
 
 
 def total_ram_gb():
@@ -1096,6 +1246,8 @@ def main():
     ap.add_argument("--log", action="store_true", help="писать вывод в ~/.f5voice/f5voice.log (для автозапуска)")
     ap.add_argument("--toggle", action="store_true", help="начать/закончить запись в работающем экземпляре")
     ap.add_argument("--cancel", action="store_true", help="отменить запись в работающем экземпляре")
+    ap.add_argument("--settings", action="store_true", help="открыть окно настроек (работающего экземпляра или нового)")
+    ap.add_argument("--service", action="store_true", help="автозапуск: без окна; если уже работает — выйти")
     ap.add_argument("--no-tray", action="store_true", help="без значка в области уведомлений")
     ap.add_argument("--check", action="store_true", help="проверить окружение, микрофон и модель в консоли")
     ap.add_argument("--probe", metavar="MODEL", help=argparse.SUPPRESS)
@@ -1106,11 +1258,6 @@ def main():
     if args.probe:
         probe_backend(args.probe, args.probe_device or "cpu", args.compute_type or "auto")
         return
-
-    if args.toggle:
-        sys.exit(send_signal("SIGUSR1"))
-    if args.cancel:
-        sys.exit(send_signal("SIGUSR2"))
 
     if args.list_devices:
         import sounddevice as sd
@@ -1147,7 +1294,16 @@ def main():
         print(f"[{lang} {scores}, исправлено {fixed}, {time.time() - t:.1f} с]\n{text}")
         return
 
-    App(cfg).run()
+    action, what = startup_action(args, control.send("ping", HOME))
+    if action == "send":
+        if not control.send(what, HOME):
+            print("F5Voice не запущен: python python/dictate.py --log &")
+            sys.exit(1)
+        return
+    if action == "exit":
+        log("F5Voice уже работает — второй экземпляр не нужен")
+        return
+    App(cfg, show_window=what).run()
 
 
 if __name__ == "__main__":

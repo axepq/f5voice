@@ -142,10 +142,13 @@ try {
     if (-not $env:F5VOICE_NO_SERVICE) {
         Step "Shortcuts: Startup, Desktop, Start menu"
         $PythonW = Join-Path $HomeDir "venv\Scripts\pythonw.exe"
+        # Autostart runs silently (--service); the Desktop and Start menu shortcuts open the app window
+        # (or start F5Voice and then open it).
         $LaunchArgs = "`"$Script`" --log"
-        New-Shortcut (Join-Path ([Environment]::GetFolderPath("Startup")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: local dictation (autostart)"
-        New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: start dictation service"
-        New-Shortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: start dictation service"
+        $ServiceArgs = "`"$Script`" --service --log"
+        New-Shortcut (Join-Path ([Environment]::GetFolderPath("Startup")) "F5Voice.lnk") $PythonW $ServiceArgs $HomeDir "F5Voice: local dictation (autostart)"
+        New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: local dictation (opens the app window)"
+        New-Shortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: local dictation (opens the app window)"
 
         Step "Launching"
         Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
@@ -172,8 +175,8 @@ try {
     Write-Host "Done. F5Voice is running and will start with Windows." -ForegroundColor Green
     Write-Host "  $Hotkey - record, press again - the text is typed where the cursor is, Esc - cancel."
     Write-Host "  It lives as a microphone icon in the tray (bottom right, maybe behind the ^ arrow)."
-    Write-Host "  Shortcuts 'F5Voice' on the Desktop and in the Start menu start it again if you closed it."
-    Write-Host "  Settings: $Config (hotkey, model, languages). Log: $Log"
+    Write-Host "  'F5Voice' on the Desktop / in the Start menu opens its window: hotkey, style, model, autostart."
+    Write-Host "  The window is also in the tray menu ('Settings...'). Settings file: $Config. Log: $Log"
     Write-Host "  NVIDIA GPU: works on CPU by default; to use the GPU see python/README.md (needs cuBLAS + cuDNN for CUDA 12)."
     Finish 0
 } catch {

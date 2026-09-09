@@ -11,6 +11,9 @@ HOME_DIR="${F5VOICE_HOME:-$HOME/.f5voice}"
 SRC="$HOME_DIR/src"
 LABEL="com.alex.f5voice"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+APP_DIR="/Applications"
+[[ -w /Applications ]] || APP_DIR="$HOME/Applications"
+APP="$APP_DIR/F5Voice.app"
 
 step() { printf '\n\033[36m▸ %s\033[0m\n' "$1"; }
 fail() { printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
@@ -87,9 +90,10 @@ step "Прогрев Python-пакетов (первый импорт компи
 step "Проверка ядра"
 (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest | tail -1) || fail "самопроверка ядра не прошла"
 
-step "Сборка приложения"
-F5VOICE_HOME="$HOME_DIR" zsh "$SRC/macos/build.sh"
-F5VOICE_HOME="$HOME_DIR" "$HOME_DIR/F5Voice.app/Contents/MacOS/F5Voice" --check | sed 's/^/    /'
+step "Сборка приложения → $APP"
+mkdir -p "$APP_DIR"
+F5VOICE_HOME="$HOME_DIR" F5VOICE_APP="$APP" zsh "$SRC/macos/build.sh"
+F5VOICE_HOME="$HOME_DIR" "$APP/Contents/MacOS/F5Voice" --check | sed 's/^/    /'
 
 if [[ -n "${F5VOICE_NO_SERVICE:-}" ]]; then
     printf '\n\033[32mСобрано без запуска службы (F5VOICE_NO_SERVICE).\033[0m\n'
@@ -103,7 +107,9 @@ for _ in $(seq 1 40); do
     launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
     sleep 0.25
 done
-sed "s|@HOME_DIR@|$HOME_DIR|g" "$SRC/macos/launchagent.plist.template" > "$PLIST"
+rm -rf "$HOME_DIR/F5Voice.app"   # старое место приложения (версии до 1.3)
+sed -e "s|@HOME_DIR@|$HOME_DIR|g" -e "s|@APP@|$APP|g" "$SRC/macos/launchagent.plist.template" > "$PLIST"
+launchctl enable "gui/$(id -u)/$LABEL" 2>/dev/null || true
 for attempt in 1 2 3 4 5; do
     if launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then break; fi
     [[ $attempt -eq 5 ]] && fail "не удалось запустить службу: launchctl bootstrap gui/$(id -u) $PLIST"
@@ -116,4 +122,5 @@ echo "Сейчас macOS спросит два разрешения (один р
 echo "  1. Микрофон — нажать «Разрешить»."
 echo "  2. Универсальный доступ — Системные настройки → Конфиденциальность и безопасность → включить F5Voice."
 echo "Потом: $HOTKEY — запись, ещё раз $HOTKEY — текст в активном поле, Esc — отмена."
-echo "Настройки: $HOME_DIR/config.json (клавиша, языки, модель), лог: $HOME_DIR/f5voice.log"
+echo "Приложение: $APP — открой его (Launchpad, Spotlight или значок в строке меню → «Настройки F5Voice…»):"
+echo "там сочетание клавиш, стиль плашки, языки, модель, автозапуск и разрешения. Лог: $HOME_DIR/f5voice.log"

@@ -9,5 +9,5 @@ hidutil property --set '{"UserKeyMapping":[]}' >/dev/null 2>&1
 tccutil reset Accessibility "$LABEL" >/dev/null 2>&1
 tccutil reset Microphone "$LABEL" >/dev/null 2>&1
 [[ -L "$HOME_DIR/src" ]] && rm -f "$HOME_DIR/src"
-rm -rf "$HOME_DIR"
+rm -rf "$HOME_DIR" /Applications/F5Voice.app "$HOME/Applications/F5Voice.app"
 echo "F5Voice удалён. Модель в ~/.cache/huggingface/hub/models--mlx-community--* можно удалить руками."

@@ -3,7 +3,7 @@
 set -uo pipefail
 HOME_DIR="${F5VOICE_HOME:-$HOME/.f5voice}"
 pkill -f "python/dictate.py" 2>/dev/null
-rm -f "$HOME/.config/autostart/f5voice.desktop"
+rm -f "$HOME/.config/autostart/f5voice.desktop" "$HOME/.local/share/applications/f5voice.desktop"
 [[ -L "$HOME_DIR/src" ]] && rm -f "$HOME_DIR/src"
 rm -rf "$HOME_DIR"
 echo "F5Voice удалён. Модель в ~/.cache/huggingface/hub можно удалить руками."
