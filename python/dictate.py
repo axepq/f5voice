@@ -49,6 +49,8 @@ from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
 from common.vad import is_silence  # noqa: E402
 
 RATE = 16000
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")              # классическая загрузка вместо hf_xet
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 HOME = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 CONFIG_PATH = HOME / "config.json"
 LAST_WAV = HOME / "last.wav"
@@ -136,53 +138,151 @@ def _enable_pip_cuda_libs():
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def probe_cuda(model, compute_type):
-    """Дочерний процесс: загрузить модель на CUDA и прогнать пустой звук. Падение — только здесь."""
+def probe_backend(model, device, compute_type):
+    """Дочерний процесс: загрузить модель и прогнать секунду тишины. Падение — только здесь."""
     if IS_WINDOWS:
         try:
             ctypes.windll.kernel32.SetErrorMode(0x8003)  # без окна «программа перестала работать»
         except Exception:  # noqa: BLE001
             pass
-    _enable_pip_cuda_libs()
+    if device == "cuda":
+        _enable_pip_cuda_libs()
     from faster_whisper import WhisperModel
 
-    m = WhisperModel(model, device="cuda", compute_type=compute_type)
+    m = WhisperModel(model, device=device, compute_type=compute_type)
     segments, _ = m.transcribe(np.zeros(RATE, dtype=np.float32), language="ru")
     list(segments)
-    print("cuda ok")
+    print(f"{device} {compute_type} ok")
 
 
-def resolve_device(cfg):
-    """cpu — как есть; cuda/auto — проверяем CUDA в отдельном процессе.
-
-    Без cuBLAS/cuDNN CTranslate2 на Windows не бросает исключение, а роняет процесс
-    (0xC0000005). Поэтому пробуем в дочернем, а результат записываем в config.json,
-    чтобы не проверять при каждом запуске. Вернуть проверку: "device": "auto".
-    """
-    want = str(cfg.get("device") or "auto").lower()
-    if want == "cpu":
-        return "cpu"
-    if want == "cuda" and cfg.get("device_checked") == "cuda":
-        return "cuda"
-    log("проверяю CUDA в отдельном процессе…")
+def _probe(model, device, compute_type, timeout=900):
+    """(получилось?, последняя строка вывода или код)."""
     try:
-        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--probe-cuda", cfg["model"],
-                            "--compute-type", str(cfg.get("compute_type") or "auto")],
-                           capture_output=True, text=True, timeout=900)
-        ok, detail = r.returncode == 0, (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [f"код {r.returncode}"]
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--probe", model,
+                            "--probe-device", device, "--compute-type", compute_type],
+                           capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        ok, detail = False, ["не уложилась в 15 минут"]
-    if ok:
-        log("CUDA работает — распознаю на видеокарте")
-        cfg["device"], cfg["device_checked"] = "cuda", "cuda"
+        return False, "не уложилась в 15 минут"
+    if r.returncode == 0:
+        return True, ""
+    lines = [ln for ln in (r.stderr or r.stdout or "").strip().splitlines() if ln.strip()]
+    code = r.returncode & 0xFFFFFFFF if r.returncode < 0 else r.returncode
+    detail = lines[-1] if lines else ""
+    if code == 0xC0000005:
+        detail = (detail + " " if detail else "") + "крах 0xC0000005 (access violation)"
+    elif code == 0xC000001D:
+        detail = (detail + " " if detail else "") + "крах 0xC000001D: процессору не хватает инструкций (нужен AVX2)"
+    return False, detail or f"код {r.returncode}"
+
+
+def model_files(model):
+    """(репозиторий, каталог snapshot в кэше или None)."""
+    from faster_whisper.utils import _MODELS
+
+    repo = _MODELS.get(model, model)
+    root = Path(os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface") / "hub")
+    if os.environ.get("HF_HUB_CACHE") is None and os.environ.get("HF_HOME"):
+        root = Path(os.environ["HF_HOME"]) / "hub"
+    snaps = root / ("models--" + repo.replace("/", "--")) / "snapshots"
+    if not snaps.is_dir():
+        return repo, None
+    dirs = sorted(snaps.iterdir(), key=lambda d: d.stat().st_mtime)
+    return repo, (dirs[-1] if dirs else None)
+
+
+def verify_model_files(model):
+    """Сверяет размеры файлов модели с сервером. (всё ли на месте, описание)."""
+    repo, snap = model_files(model)
+    if snap is None:
+        return False, "файлы модели не скачаны"
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo, files_metadata=True)
+        remote = {s.rfilename: s.size for s in info.siblings if s.size}
+    except Exception as e:  # noqa: BLE001
+        sizes = {f.name: f.stat().st_size for f in snap.iterdir() if f.is_file()}
+        return "model.bin" in sizes and sizes["model.bin"] > 1_000_000, f"сервер недоступен ({type(e).__name__}), локально: {sizes}"
+    bad = []
+    for name, size in remote.items():
+        if name not in ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json") and not name.startswith("vocabulary"):
+            continue
+        local = snap / name
+        if not local.exists():
+            bad.append(f"{name}: нет")
+        elif local.stat().st_size != size:
+            bad.append(f"{name}: {local.stat().st_size} байт вместо {size}")
+    return (not bad), (", ".join(bad) if bad else f"все файлы совпадают с сервером ({snap})")
+
+
+def redownload_model(model):
+    """Удаляет кэш модели и качает заново классическим способом."""
+    import shutil
+
+    from faster_whisper.utils import _MODELS
+    from huggingface_hub import snapshot_download
+
+    repo = _MODELS.get(model, model)
+    _, snap = model_files(model)
+    if snap is not None:
+        shutil.rmtree(snap.parent.parent, ignore_errors=True)
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    snapshot_download(repo, allow_patterns=["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"])
+
+
+def resolve_backend(cfg):
+    """Возвращает (device, compute_type), на которых модель точно загружается.
+
+    Всё рискованное — в дочерних процессах: CTranslate2 на Windows при проблемах не
+    бросает исключение, а роняет процесс (0xC0000005). Результат записывается в
+    config.json, чтобы не проверять при каждом запуске; вернуть проверку —
+    "device": "auto" или удалить "backend_checked".
+    """
+    model = cfg["model"]
+    want_dev = str(cfg.get("device") or "auto").lower()
+    want_ct = str(cfg.get("compute_type") or "auto").lower()
+    checked = cfg.get("backend_checked") or ""
+    if checked == f"{model}|{want_dev}|{want_ct}" and want_dev != "auto" and want_ct != "auto":
+        return want_dev, want_ct
+
+    def remember(dev, ct):
+        cfg["device"], cfg["compute_type"], cfg["backend_checked"] = dev, ct, f"{model}|{dev}|{ct}"
         save_config(cfg)
-        return "cuda"
-    log(f"CUDA не заработала ({detail[0]}) — работаю на процессоре. Для видеокарты NVIDIA см. README: "
-        "нужны cuBLAS и cuDNN для CUDA 12.")
-    cfg["device"] = "cpu"
-    cfg["device_note"] = "auto → cpu: CUDA не прошла проверку. Поставь \"auto\", чтобы проверить снова."
-    save_config(cfg)
-    return "cpu"
+        return dev, ct
+
+    if want_dev in ("auto", "cuda"):
+        log("проверяю CUDA в отдельном процессе…")
+        ok, detail = _probe(model, "cuda", want_ct)
+        if ok:
+            log("CUDA работает — распознаю на видеокарте")
+            return remember("cuda", want_ct)
+        log(f"CUDA не заработала ({detail}) — работаю на процессоре. Для видеокарты NVIDIA см. README: "
+            "нужны cuBLAS и cuDNN для CUDA 12.")
+        cfg["device_note"] = "auto → cpu: CUDA не прошла проверку. Поставь \"auto\", чтобы проверить снова."
+
+    candidates = [want_ct] if want_ct != "auto" else ["int8", "float32"]
+    for attempt in range(2):
+        for ct in candidates:
+            log(f"проверяю загрузку модели на процессоре ({ct})…")
+            ok, detail = _probe(model, "cpu", ct)
+            if ok:
+                return remember("cpu", ct)
+            log(f"не загрузилась ({ct}): {detail}")
+        if attempt == 1:
+            break
+        # Модель не грузится ни так, ни так: либо файлы, либо сама библиотека.
+        ok_files, what = verify_model_files(model)
+        log(f"файлы модели: {what}")
+        ok_tiny, detail = _probe("tiny", "cpu", "float32")
+        if not ok_tiny:
+            log(f"даже крошечная модель не грузится ({detail}) — пробую CTranslate2 4.5.0 вместо текущей")
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "ctranslate2==4.5.0"], check=False)
+        elif not ok_files:
+            log("крошечная модель работает — большая, похоже, повреждена, скачиваю заново")
+            redownload_model(model)
+        else:
+            log("крошечная модель работает и файлы целы — возможно, не хватает памяти; пробую ещё раз")
+    raise RuntimeError(f"не удалось загрузить модель {model} ни на CUDA, ни на процессоре — см. лог выше")
 
 
 def beep(kind="start"):
@@ -205,12 +305,12 @@ class Recognizer:
         self.langs = tuple(x.strip() for x in cfg["languages"].split(",") if x.strip()) or ("ru",)
         self.alt_min = float(cfg["alt_language_min_prob"])
         self.prompt = cfg["prompt"] or DEFAULT_PROMPT
-        device = resolve_device(cfg)
+        device, compute_type = resolve_backend(cfg)
         if device == "cuda":
             _enable_pip_cuda_libs()
         t = time.time()
-        log(f"загружаю модель {cfg['model']} ({device}, {cfg['compute_type']})…")
-        self.model = WhisperModel(cfg["model"], device=device, compute_type=cfg["compute_type"])
+        log(f"загружаю модель {cfg['model']} ({device}, {compute_type})…")
+        self.model = WhisperModel(cfg["model"], device=device, compute_type=compute_type)
         warm = np.random.default_rng(0).normal(0, 1e-4, RATE).astype(np.float32)  # нули дают предупреждения numpy
         self.run(warm, self.langs[0])
         log(f"модель готова за {time.time() - t:.1f} с")
@@ -564,12 +664,31 @@ def send_signal(name):
         return 1
 
 
+def total_ram_gb():
+    try:
+        if IS_WINDOWS:
+            class MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            s = MemStatus()
+            s.dwLength = ctypes.sizeof(MemStatus)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(s))
+            return f"{s.ullTotalPhys / 2**30:.1f} ГБ, свободно {s.ullAvailPhys / 2**30:.1f} ГБ"
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        return f"{total / 2**30:.1f} ГБ"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def check(cfg):
     """Диагностика в консоли: окружение, микрофон, загрузка модели, пробное распознавание."""
     import faster_whisper
     import ctranslate2
 
-    print(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер")
+    print(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер, ОЗУ {total_ram_gb()}")
     print(f"faster-whisper {faster_whisper.__version__}, ctranslate2 {ctranslate2.__version__}, "
           f"CUDA-устройств: {ctranslate2.get_cuda_device_count()}, "
           f"типы вычислений CPU: {', '.join(sorted(ctranslate2.get_supported_compute_types('cpu')))}")
@@ -578,6 +697,8 @@ def check(cfg):
         print(f"микрофон: {rec.name} ({rec.rate} Гц)")
     except Exception as e:  # noqa: BLE001
         print(f"! микрофон недоступен: {type(e).__name__}: {e}")
+    ok_files, what = verify_model_files(cfg["model"])
+    print(f"файлы модели: {what}")
     t = time.time()
     r = Recognizer(cfg)
     print(f"модель загружена за {time.time() - t:.1f} с")
@@ -599,12 +720,13 @@ def main():
     ap.add_argument("--cancel", action="store_true", help="отменить запись в работающем экземпляре")
     ap.add_argument("--no-tray", action="store_true", help="без значка в области уведомлений")
     ap.add_argument("--check", action="store_true", help="проверить окружение, микрофон и модель в консоли")
-    ap.add_argument("--probe-cuda", metavar="MODEL", help=argparse.SUPPRESS)
+    ap.add_argument("--probe", metavar="MODEL", help=argparse.SUPPRESS)
+    ap.add_argument("--probe-device", help=argparse.SUPPRESS)
     ap.add_argument("--compute-type", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
-    if args.probe_cuda:
-        probe_cuda(args.probe_cuda, args.compute_type or "auto")
+    if args.probe:
+        probe_backend(args.probe, args.probe_device or "cpu", args.compute_type or "auto")
         return
 
     if args.toggle:

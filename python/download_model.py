@@ -11,6 +11,7 @@ faster_whisper.utils.download_model нарочно глушит tqdm, и заг�
 import os
 import sys
 
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")  # классическая загрузка: hf_xet на Windows давал битые файлы
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 def _utf8_console():
