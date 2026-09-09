@@ -104,6 +104,20 @@ try {
     $Model = if ($Cfg.model) { $Cfg.model } else { "large-v3-turbo" }
     $Hotkey = if ($Cfg.hotkey) { $Cfg.hotkey } else { "<ctrl>+<alt>+<space>" }
 
+    Step "NVIDIA GPU check"
+    $GpuCount = 0
+    try { $GpuCount = [int](& $VenvPy -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())") } catch { $GpuCount = 0 }
+    if ($GpuCount -gt 0) {
+        $HasCudnn = 0
+        try { $HasCudnn = [int](& $VenvPy -c "import importlib.util as u; print(1 if u.find_spec('nvidia.cudnn') else 0)") } catch { $HasCudnn = 0 }
+        if ($HasCudnn -eq 0) {
+            Step "NVIDIA GPU found - installing CUDA libraries (cuBLAS + cuDNN, ~1 GB) so recognition runs on the GPU"
+            & $VenvPy -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+            if ($LASTEXITCODE -ne 0) { Write-Host "CUDA libraries did not install; F5Voice will use the CPU." -ForegroundColor Yellow }
+            else { & $VenvPy -c "import json; p=r'$Config'; c=json.load(open(p,encoding='utf-8')); c['device']='auto'; c.pop('backend_checked',None); c.pop('device_note',None); json.dump(c,open(p,'w',encoding='utf-8'),ensure_ascii=False,indent=2)" }
+        } else { Write-Host "CUDA libraries already installed." }
+    } else { Write-Host "No NVIDIA GPU detected - recognition will run on the CPU." }
+
     Step "Model $Model (first time ~1.6 GB, progress below)"
     $env:PYTHONWARNINGS = "ignore"
     & $VenvPy (Join-Path $Src "python\download_model.py") $Model

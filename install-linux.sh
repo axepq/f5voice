@@ -82,6 +82,17 @@ step "Зависимости (faster-whisper и остальное, около 2
 MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('model') or 'large-v3-turbo')")"
 HOTKEY="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('hotkey') or '<ctrl>+<alt>+<space>')")"
 
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    if ! "$HOME_DIR/venv/bin/python" -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('nvidia.cudnn') else 1)" 2>/dev/null; then
+        step "Видеокарта NVIDIA найдена — ставлю библиотеки CUDA (cuBLAS и cuDNN, около 1 ГБ), чтобы распознавать на ней"
+        if "$HOME_DIR/venv/bin/pip" install nvidia-cublas-cu12 nvidia-cudnn-cu12; then
+            "$HOME_DIR/venv/bin/python" -c "import json; p='$HOME_DIR/config.json'; c=json.load(open(p)); c['device']='auto'; c.pop('backend_checked',None); c.pop('device_note',None); json.dump(c,open(p,'w'),ensure_ascii=False,indent=2)"
+        else
+            echo "Библиотеки CUDA не поставились — F5Voice будет работать на процессоре."
+        fi
+    fi
+fi
+
 step "Модель $MODEL (первый раз около 1,6 ГБ, ниже будет прогресс)"
 PYTHONWARNINGS=ignore "$HOME_DIR/venv/bin/python" "$SRC/python/download_model.py" "$MODEL" \
     || fail "не удалось скачать модель $MODEL — проверь интернет и имя модели в $HOME_DIR/config.json"
