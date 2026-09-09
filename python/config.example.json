@@ -12,5 +12,7 @@
   "newline": "shift+enter",
   "input_device": null,
   "tray": true,
-  "hud": true
+  "hud": true,
+  "cpu_threads": 0,
+  "beam_size": 0
 }

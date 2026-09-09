@@ -77,6 +77,8 @@ DEFAULTS = {
     "input_device": None,              # номер или имя из --list-devices, None — по умолчанию
     "tray": True,                      # значок в области уведомлений (нужны pystray и Pillow)
     "hud": True,                       # плашка внизу экрана: запись, уровень, распознавание, результат
+    "cpu_threads": 0,                  # потоков для CTranslate2 на процессоре, 0 — по числу ядер
+    "beam_size": 0,                    # ширина поиска, 0 — авто: 1 на процессоре (быстро), 5 на видеокарте
 }
 
 
@@ -401,9 +403,11 @@ class Recognizer:
             _enable_pip_cuda_libs()
         from faster_whisper import WhisperModel
 
+        threads = int(cfg.get("cpu_threads") or 0) or max(4, min(16, (os.cpu_count() or 8) // 2))
+        self.beam = int(cfg.get("beam_size") or 0) or (5 if device == "cuda" else 1)
         t = time.time()
-        log(f"загружаю модель {cfg['model']} ({device}, {compute_type})…")
-        self.model = WhisperModel(cfg["model"], device=device, compute_type=compute_type)
+        log(f"загружаю модель {cfg['model']} ({device}, {compute_type}, потоков {threads}, лучей {self.beam})…")
+        self.model = WhisperModel(cfg["model"], device=device, compute_type=compute_type, cpu_threads=threads)
         warm = np.random.default_rng(0).normal(0, 1e-4, RATE).astype(np.float32)  # нули дают предупреждения numpy
         self.run(warm, self.langs[0])
         log(f"модель готова за {time.time() - t:.1f} с")
@@ -428,7 +432,7 @@ class Recognizer:
             initial_prompt=prompt or self.prompt,
             condition_on_previous_text=True,
             temperature=list(temperature) if isinstance(temperature, tuple) else temperature,
-            beam_size=5,
+            beam_size=self.beam,
             vad_filter=False,
         )
         return [(s.start, s.end, s.text) for s in segments]
@@ -734,12 +738,10 @@ class App:
 
     def toggle(self):
         with self.lock:
-            if self.state == "idle":
-                self._start()
-            elif self.state == "recording":
+            if self.state == "recording":
                 self._stop()
-            else:
-                log("… ещё распознаю предыдущее")
+            else:  # idle или ещё распознаём предыдущее — новую запись можно начинать сразу
+                self._start()
 
     def cancel(self):
         with self.lock:
@@ -803,7 +805,8 @@ class App:
             self._show("error", f"Ошибка: {type(e).__name__}: {str(e)[:60]}", 6)
         finally:
             with self.lock:
-                self._set_state("idle")
+                if self.state == "transcribing":  # если уже пишем новую — не сбивать
+                    self._set_state("idle")
 
     def quit(self):
         log("выход")
