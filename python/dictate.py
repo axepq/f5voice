@@ -575,11 +575,8 @@ class HUD(threading.Thread):
         "light": ("#f2f2f5", "#111111", False),
         "dark": ("#0d0d10", "#ffffff", True),
     }
-    # Цикл полос как в шейдере liquid metal (paper-design, кнопки Vengeance UI): тонкая белая,
-    # тонкая тёмная, снова белая и длинный градиент от белого к почти чёрному.
-    CHROME = [(0.000, 250), (0.040, 250), (0.055, 36), (0.080, 36), (0.095, 250), (0.120, 250),
-              (0.140, 237), (0.480, 158), (0.780, 72), (1.000, 23)]
     TICK_MS = 33          # 30 кадров в секунду
+    GLINT_SECONDS = 5.0   # один оборот блика по кольцу
     ALPHA = 0.94          # непрозрачность плашки; появление и уход — плавным затуханием
 
     def __init__(self, app, level_fn, style="glass"):
@@ -596,6 +593,7 @@ class HUD(threading.Thread):
         self.hist = collections.deque([0.0] * 11, maxlen=11)   # 10 видимых столбиков + въезжающий справа
         self.scroll = 0.0       # сдвиг столбиков в пикселях, 0…6
         self.level = 0.0        # сглаженный уровень
+        self.glint = 0.0        # положение блика на кольце, доля контура
         self.alpha = 0.0        # текущая прозрачность окна
         self.alpha_target = 0.0
         self.closing = False
@@ -730,20 +728,6 @@ class HUD(threading.Thread):
         b = [int(bg[i:i + 2], 16) for i in (1, 3, 5)]
         return "#%02x%02x%02x" % tuple(int(b[i] + (f[i] - b[i]) * t) for i in range(3))
 
-    @classmethod
-    def chrome(cls, t):
-        """Яркость хрома в точке t цикла (0…1) → цвет."""
-        t -= math.floor(t)
-        stops = cls.CHROME
-        for (t0, v0), (t1, v1) in zip(stops, stops[1:]):
-            if t <= t1:
-                v = v0 + (v1 - v0) * (t - t0) / max(t1 - t0, 1e-6)
-                break
-        else:
-            v = stops[-1][1]
-        v = int(max(0, min(255, v)))
-        return f"#{v:02x}{v:02x}{min(255, v + 4):02x}"
-
     def _pill_points(self, n, inset):
         """n точек по периметру плашки-капсулы (по часовой, старт слева вверху)."""
         w, h = self.W - 2 * inset, self.H - 2 * inset
@@ -766,14 +750,19 @@ class HUD(threading.Thread):
             pts.append((x + inset, y + inset))
         return pts
 
-    def _draw_metal_ring(self, c, width=3, repetition=4):
-        """Хромовое кольцо по краю: четыре цикла полос бегут по периметру."""
+    def _draw_metal_ring(self, c, width=3):
+        """Стальное кольцо (светлее сверху, темнее снизу) и один блик с хвостом, идущий по контуру."""
         pts = self._pill_points(96, width / 2 + 1)
         n = len(pts) - 1
-        shift = self.phase * 0.009
+        self.glint = (self.glint + self.TICK_MS / 1000.0 / self.GLINT_SECONDS) % 1.0
         for i in range(n):
             (x0, y0), (x1, y1) = pts[i], pts[i + 1]
-            c.create_line(x0, y0, x1, y1, fill=self.chrome(i / n * repetition + shift), width=width, capstyle="round")
+            ny = (y0 + y1) / 2 / self.H                      # 0 — верх, 1 — низ
+            base = 160 - 95 * ny
+            d = (self.glint - i / n) % 1.0                   # сколько контура позади головы блика
+            k = (1.0 - d / 0.2) ** 2 if d < 0.2 else 0.0
+            v = int(base + (255 - base) * k)
+            c.create_line(x0, y0, x1, y1, fill=f"#{v:02x}{v:02x}{min(255, v + 4):02x}", width=width, capstyle="round")
 
     def _draw(self):
         c = self.canvas

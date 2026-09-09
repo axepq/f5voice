@@ -492,90 +492,84 @@ final class Worker {
 
 enum HUDBars { case none, live, wave }
 
-/// Цикл полос «жидкого металла» (как в шейдере paper-design liquid metal, которым сделаны кнопки
-/// Vengeance UI): тонкая белая, тонкая тёмная, снова белая и длинный градиент от белого к почти чёрному.
-let chromeCycle: [(CGFloat, NSColor)] = [
-    (0.000, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.040, NSColor(calibratedWhite: 0.98, alpha: 1)),
-    (0.055, NSColor(calibratedWhite: 0.14, alpha: 1)), (0.080, NSColor(calibratedWhite: 0.14, alpha: 1)),
-    (0.095, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.120, NSColor(calibratedWhite: 0.98, alpha: 1)),
-    (0.140, NSColor(calibratedWhite: 0.93, alpha: 1)), (0.480, NSColor(calibratedWhite: 0.62, alpha: 1)),
-    (0.780, NSColor(calibratedWhite: 0.28, alpha: 1)), (1.000, NSColor(calibratedWhite: 0.09, alpha: 1)),
-]
-let hudResizeDuration = 0.22
-
-/// Хромовое кольцо по краю плашки: полосы хрома медленно текут вдоль капсулы (равномерно,
-/// без резких рывков на длинных сторонах), сверху кольцо светлее, снизу темнее — объём.
+/// Хромовое кольцо по краю плашки: неподвижная сталь (светлее сверху, темнее снизу) и один блик
+/// с гаснущим хвостом, который равномерно обходит контур по кругу (strokeStart/strokeEnd по
+/// удвоенному пути — так блик не рвётся на стыке).
 final class MetalRing {
     let layer = CALayer()
-    private let sheen = CAGradientLayer()
-    private let shade = CAGradientLayer()
+    private let base = CAGradientLayer()
     private let mask = CAShapeLayer()
-    private var period: CGFloat = 0
+    private var glints: [CAShapeLayer] = []
     let width: CGFloat = 3
+    private let loopSeconds = 5.0
+    private let tail: [(length: CGFloat, alpha: CGFloat)] = [(0.20, 0.18), (0.14, 0.36), (0.09, 0.65), (0.045, 1.0)]
 
     init() {
-        sheen.type = .axial
-        sheen.startPoint = CGPoint(x: 0, y: 0.5)
-        sheen.endPoint = CGPoint(x: 1, y: 0.5)
-        var colors: [CGColor] = []
-        var locations: [NSNumber] = []
-        let cycles = 8  // слой вдвое шире кольца: четыре цикла полос на ширину, восемь на слой
-        for r in 0..<cycles {
-            for (t, c) in chromeCycle {
-                colors.append(c.cgColor)
-                locations.append(NSNumber(value: (Double(r) + Double(t)) / Double(cycles)))
-            }
-        }
-        sheen.colors = colors
-        sheen.locations = locations
-        sheen.anchorPoint = .zero
-        shade.type = .axial
-        shade.startPoint = CGPoint(x: 0.5, y: 1)
-        shade.endPoint = CGPoint(x: 0.5, y: 0)
-        shade.colors = [NSColor(calibratedWhite: 1, alpha: 0.5).cgColor, NSColor(calibratedWhite: 1, alpha: 0).cgColor,
-                        NSColor(calibratedWhite: 0, alpha: 0.45).cgColor]
-        shade.locations = [0, 0.45, 1]
+        base.type = .axial
+        base.startPoint = CGPoint(x: 0.5, y: 1)
+        base.endPoint = CGPoint(x: 0.5, y: 0)
+        base.colors = [NSColor(calibratedWhite: 0.74, alpha: 1).cgColor, NSColor(calibratedWhite: 0.52, alpha: 1).cgColor,
+                       NSColor(calibratedWhite: 0.24, alpha: 1).cgColor, NSColor(calibratedWhite: 0.40, alpha: 1).cgColor]
+        base.locations = [0, 0.32, 0.8, 1]
         mask.fillColor = nil
         mask.strokeColor = NSColor.black.cgColor
         mask.lineWidth = width
         layer.mask = mask
-        layer.addSublayer(sheen)
-        layer.addSublayer(shade)
+        layer.addSublayer(base)
+        let longest = tail.map { $0.length }.max() ?? 0
+        for (length, alpha) in tail {
+            let g = CAShapeLayer()
+            g.fillColor = nil
+            g.strokeColor = NSColor.white.withAlphaComponent(alpha).cgColor
+            g.lineWidth = width
+            g.lineCap = .round
+            // Доли считаются по удвоенному пути: один оборот = 0.5. Голова у всех штрихов общая.
+            let head = longest / 2
+            let start = (longest - length) / 2
+            g.strokeStart = start
+            g.strokeEnd = head
+            for (key, from) in [("strokeStart", start), ("strokeEnd", head)] {
+                let a = CABasicAnimation(keyPath: key)
+                a.fromValue = from
+                a.toValue = from + 0.5
+                a.duration = loopSeconds
+                a.repeatCount = .infinity
+                a.timingFunction = CAMediaTimingFunction(name: .linear)
+                g.add(a, forKey: key)
+            }
+            layer.addSublayer(g)
+            glints.append(g)
+        }
     }
 
     func layout(in bounds: CGRect, cornerRadius: CGFloat, animated: Bool) {
-        let path = CGPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2),
-                          cornerWidth: cornerRadius - width / 2, cornerHeight: cornerRadius - width / 2, transform: nil)
+        let inset = bounds.insetBy(dx: width / 2, dy: width / 2)
+        let pill = CGPath(roundedRect: inset, cornerWidth: cornerRadius - width / 2, cornerHeight: cornerRadius - width / 2, transform: nil)
+        let doubled = CGMutablePath()
+        doubled.addPath(pill)
+        doubled.addPath(pill)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer.frame = bounds
         mask.frame = bounds
-        shade.frame = bounds
+        base.frame = bounds
         if animated, let from = mask.presentation()?.path ?? mask.path {
             let a = CABasicAnimation(keyPath: "path")
             a.fromValue = from
-            a.toValue = path
+            a.toValue = pill
             a.duration = hudResizeDuration
             a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             mask.add(a, forKey: "path")
         }
-        mask.path = path
-        if abs(bounds.width - period) > 0.5 {
-            period = bounds.width
-            sheen.removeAnimation(forKey: "flow")
-            sheen.bounds = CGRect(x: 0, y: 0, width: period * 2, height: bounds.height)
-            sheen.position = .zero
-            let flow = CABasicAnimation(keyPath: "position.x")
-            flow.fromValue = 0
-            flow.toValue = -period
-            flow.duration = Double(period) / 34   // около 34 px/с: спокойное течение
-            flow.repeatCount = .infinity
-            flow.timingFunction = CAMediaTimingFunction(name: .linear)
-            sheen.add(flow, forKey: "flow")
+        mask.path = pill
+        for g in glints {
+            g.frame = bounds
+            g.path = doubled
         }
         CATransaction.commit()
     }
 }
+let hudResizeDuration = 0.22
 
 enum HUDAnim { case none, breathe, pulse, variableColor }
 
