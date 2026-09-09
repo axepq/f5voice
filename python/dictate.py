@@ -261,22 +261,26 @@ def resolve_backend(cfg):
         cfg["device_note"] = "auto → cpu: CUDA не прошла проверку. Поставь \"auto\", чтобы проверить снова."
 
     candidates = [want_ct] if want_ct != "auto" else ["int8", "float32"]
-    for attempt in range(2):
+    fallback_versions = ["4.5.0", "4.4.0"]  # старые сборки CTranslate2 работают на процессорах без AVX2
+    for attempt in range(1 + len(fallback_versions)):
         for ct in candidates:
             log(f"проверяю загрузку модели на процессоре ({ct})…")
             ok, detail = _probe(model, "cpu", ct)
             if ok:
                 return remember("cpu", ct)
             log(f"не загрузилась ({ct}): {detail}")
-        if attempt == 1:
+        if attempt == len(fallback_versions):
             break
         # Модель не грузится ни так, ни так: либо файлы, либо сама библиотека.
         ok_files, what = verify_model_files(model)
         log(f"файлы модели: {what}")
         ok_tiny, detail = _probe("tiny", "cpu", "float32")
         if not ok_tiny:
-            log(f"даже крошечная модель не грузится ({detail}) — пробую CTranslate2 4.5.0 вместо текущей")
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "ctranslate2==4.5.0"], check=False)
+            version = fallback_versions[attempt]
+            log(f"даже крошечная модель не грузится ({detail}) — ставлю CTranslate2 {version} "
+                f"(с setuptools: старым версиям нужен pkg_resources)")
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", f"ctranslate2=={version}", "setuptools"],
+                           check=False)
         elif not ok_files:
             log("крошечная модель работает — большая, похоже, повреждена, скачиваю заново")
             redownload_model(model)
@@ -510,7 +514,7 @@ class App:
         self.lock = threading.Lock()
         self.tray = None
         self.hotkeys = None
-        log(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер")
+        log(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер, {platform.processor() or '?'}")
         try:
             self.recorder = Recorder(cfg["input_device"])
         except Exception as e:  # noqa: BLE001
@@ -685,13 +689,15 @@ def total_ram_gb():
 
 def check(cfg):
     """Диагностика в консоли: окружение, микрофон, загрузка модели, пробное распознавание."""
-    import faster_whisper
-    import ctranslate2
+    from importlib.metadata import version
 
     print(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер, ОЗУ {total_ram_gb()}")
-    print(f"faster-whisper {faster_whisper.__version__}, ctranslate2 {ctranslate2.__version__}, "
-          f"CUDA-устройств: {ctranslate2.get_cuda_device_count()}, "
-          f"типы вычислений CPU: {', '.join(sorted(ctranslate2.get_supported_compute_types('cpu')))}")
+    print(f"процессор: {platform.processor() or '?'}")
+    info = subprocess.run([sys.executable, "-c", "import ctranslate2 as c; print(c.get_cuda_device_count(), "
+                           "','.join(sorted(c.get_supported_compute_types('cpu'))))"], capture_output=True, text=True)
+    cuda, types = (info.stdout.split() + ["?", "?"])[:2] if info.returncode == 0 else ("?", "импорт ctranslate2 упал")
+    print(f"faster-whisper {version('faster_whisper')}, ctranslate2 {version('ctranslate2')}, "
+          f"CUDA-устройств: {cuda}, типы вычислений CPU: {types}")
     try:
         rec = Recorder(cfg["input_device"])
         print(f"микрофон: {rec.name} ({rec.rate} Гц)")
