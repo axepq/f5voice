@@ -8,6 +8,7 @@
 # Never calls `exit` when piped through iex: that would close the whole PowerShell window.
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"          # Python prints Cyrillic/arrows even on cp1252 consoles
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}   # and the console shows them
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 $IsFileMode = [bool]$MyInvocation.MyCommand.Path
@@ -117,10 +118,14 @@ try {
     Pop-Location
     if ($selftest -ne 0) { Fail "core self-test failed: cd $Src; $VenvPy -m common.selftest" }
 
+    $Script = Join-Path $Src "python\dictate.py"
+    Step "Checking microphone and model load in the foreground (may take a minute on CPU)"
+    & $VenvPy $Script --check
+    if ($LASTEXITCODE -ne 0) { Fail ("model or microphone check failed (exit code $LASTEXITCODE). The messages above say why." + $(if ($LASTEXITCODE -eq -1073741795) { " Exit code 0xC000001D = this CPU lacks instructions required by CTranslate2." } else { "" })) }
+
     if (-not $env:F5VOICE_NO_SERVICE) {
         Step "Shortcuts: Startup, Desktop, Start menu"
         $PythonW = Join-Path $HomeDir "venv\Scripts\pythonw.exe"
-        $Script = Join-Path $Src "python\dictate.py"
         $LaunchArgs = "`"$Script`" --log"
         New-Shortcut (Join-Path ([Environment]::GetFolderPath("Startup")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: local dictation (autostart)"
         New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: start dictation service"
@@ -130,11 +135,21 @@ try {
         Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
             Where-Object { $_.CommandLine -like "*python\dictate.py*" } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $Log) { Add-Content -Path $Log -Value "" -Encoding UTF8 }
+        $mark = if (Test-Path $Log) { (Get-Content $Log -Encoding UTF8).Count } else { 0 }
         Start-Process -FilePath $PythonW -ArgumentList $LaunchArgs -WorkingDirectory $HomeDir
-        Start-Sleep -Seconds 6
-        $alive = Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" | Where-Object { $_.CommandLine -like "*python\dictate.py*" }
+        Write-Host "Waiting for F5Voice to load the model (up to 90 s)..."
+        $deadline = (Get-Date).AddSeconds(90)
+        $ready = $false
+        do {
+            Start-Sleep -Seconds 3
+            $alive = Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" | Where-Object { $_.CommandLine -like "*python\dictate.py*" }
+            $fresh = if (Test-Path $Log) { (Get-Content $Log -Encoding UTF8) | Select-Object -Skip $mark } else { @() }
+            if ($fresh -match "\[READY\]") { $ready = $true }
+            if ($fresh -match "\[FATAL\]") { break }
+        } until ($ready -or -not $alive -or (Get-Date) -gt $deadline)
         if (Test-Path $Log) { Write-Host "Log tail ($Log):"; Get-Content $Log -Tail 8 -Encoding UTF8 | ForEach-Object { "    $_" } }
-        if (-not $alive) { Fail "F5Voice started but exited right away. The log above says why; send it to the author." }
+        if (-not $ready) { Fail "F5Voice did not report readiness. The log above says why; send it to the author." }
     }
 
     Write-Host ""

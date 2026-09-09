@@ -89,6 +89,9 @@ PYTHONWARNINGS=ignore "$HOME_DIR/venv/bin/python" "$SRC/python/download_model.py
 step "Проверка ядра"
 (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest | tail -1) || fail "самопроверка ядра не прошла"
 
+step "Проверка микрофона и загрузки модели (на процессоре может занять минуту)"
+"$HOME_DIR/venv/bin/python" "$SRC/python/dictate.py" --check || fail "проверка модели или микрофона не прошла — причина выше"
+
 if [[ -z "${F5VOICE_NO_SERVICE:-}" ]]; then
     step "Автозапуск в графической сессии"
     mkdir -p "$HOME/.config/autostart"
@@ -104,15 +107,19 @@ DESKTOP
     step "Запуск"
     pkill -f "python/dictate.py" 2>/dev/null || true
     sleep 1
+    MARK=$(wc -l < "$HOME_DIR/f5voice.log" 2>/dev/null || echo 0)
     nohup "$HOME_DIR/venv/bin/python" "$SRC/python/dictate.py" --log >/dev/null 2>&1 &
-    sleep 3
-    if pgrep -f "python/dictate.py" >/dev/null; then
-        echo "F5Voice работает. Первые строки лога:"
-        tail -5 "$HOME_DIR/f5voice.log" 2>/dev/null | sed 's/^/    /' || true
-    else
-        echo "F5Voice не запустился, смотри $HOME_DIR/f5voice.log:"
-        tail -20 "$HOME_DIR/f5voice.log" 2>/dev/null | sed 's/^/    /' || true
-    fi
+    echo "Жду, пока F5Voice загрузит модель (до 90 с)…"
+    READY=""
+    for _ in $(seq 1 30); do
+        sleep 3
+        if tail -n +"$((MARK + 1))" "$HOME_DIR/f5voice.log" 2>/dev/null | grep -q '\[READY\]'; then READY=1; break; fi
+        if tail -n +"$((MARK + 1))" "$HOME_DIR/f5voice.log" 2>/dev/null | grep -q '\[FATAL\]'; then break; fi
+        pgrep -f "python/dictate.py" >/dev/null || break
+    done
+    echo "Хвост лога ($HOME_DIR/f5voice.log):"
+    tail -8 "$HOME_DIR/f5voice.log" 2>/dev/null | sed 's/^/    /' || true
+    [[ -n "$READY" ]] || fail "F5Voice не сообщил о готовности — причина в логе выше"
 fi
 
 printf '\n\033[32mГотово.\033[0m F5Voice будет стартовать вместе с рабочим столом.\n'

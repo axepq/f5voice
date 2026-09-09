@@ -310,10 +310,11 @@ class App:
         self.lock = threading.Lock()
         self.tray = None
         self.hotkeys = None
+        log(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер")
         try:
             self.recorder = Recorder(cfg["input_device"])
         except Exception as e:  # noqa: BLE001
-            log(f"! микрофон недоступен: {type(e).__name__}: {e}")
+            log(f"[FATAL] микрофон недоступен: {type(e).__name__}: {e}")
             log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
                 "выбрать: \"input_device\" в config.json")
             sys.exit(1)
@@ -411,9 +412,9 @@ class App:
         try:
             self.hotkeys = keyboard.GlobalHotKeys({self.cfg["hotkey"]: self.toggle, "<esc>": self.cancel})
             self.hotkeys.start()
-            log(f"готов: {self.cfg['hotkey']} — диктовка, Esc — отмена, Ctrl+C — выход.")
+            log(f"[READY] готов: {self.cfg['hotkey']} — диктовка, Esc — отмена, Ctrl+C — выход.")
         except Exception as e:  # noqa: BLE001
-            log(f"! глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
+            log(f"[READY] глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":
             log("Wayland: глобальные клавиши через pynput не работают. Назначь в настройках рабочего стола "
                 "сочетание на команду «python python/dictate.py --toggle».")
@@ -463,6 +464,30 @@ def send_signal(name):
         return 1
 
 
+def check(cfg):
+    """Диагностика в консоли: окружение, микрофон, загрузка модели, пробное распознавание."""
+    import faster_whisper
+    import ctranslate2
+
+    print(f"Python {platform.python_version()}, {platform.platform()}, {os.cpu_count()} ядер")
+    print(f"faster-whisper {faster_whisper.__version__}, ctranslate2 {ctranslate2.__version__}, "
+          f"CUDA-устройств: {ctranslate2.get_cuda_device_count()}, "
+          f"типы вычислений CPU: {', '.join(sorted(ctranslate2.get_supported_compute_types('cpu')))}")
+    try:
+        rec = Recorder(cfg["input_device"])
+        print(f"микрофон: {rec.name} ({rec.rate} Гц)")
+    except Exception as e:  # noqa: BLE001
+        print(f"! микрофон недоступен: {type(e).__name__}: {e}")
+    t = time.time()
+    r = Recognizer(cfg)
+    print(f"модель загружена за {time.time() - t:.1f} с")
+    audio = np.random.default_rng(0).normal(0, 0.02, RATE * 2).astype(np.float32)
+    t = time.time()
+    text, lang, scores, _fixed = r.recognize(audio)
+    print(f"пробное распознавание 2 с шума: {time.time() - t:.1f} с, язык {lang} {scores}, текст {text!r}")
+    print("[READY] проверка пройдена")
+
+
 def main():
     ap = argparse.ArgumentParser(description="F5Voice: локальная диктовка по горячей клавише")
     ap.add_argument("--file", help="распознать готовый аудиофайл и выйти")
@@ -473,6 +498,7 @@ def main():
     ap.add_argument("--toggle", action="store_true", help="начать/закончить запись в работающем экземпляре")
     ap.add_argument("--cancel", action="store_true", help="отменить запись в работающем экземпляре")
     ap.add_argument("--no-tray", action="store_true", help="без значка в области уведомлений")
+    ap.add_argument("--check", action="store_true", help="проверить окружение, микрофон и модель в консоли")
     args = ap.parse_args()
 
     if args.toggle:
@@ -498,6 +524,10 @@ def main():
         cfg["device"] = args.device
     if args.no_tray:
         cfg["tray"] = False
+
+    if args.check:
+        check(cfg)
+        return
 
     if args.file:
         rec = Recognizer(cfg)
