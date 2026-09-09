@@ -406,6 +406,11 @@ class App:
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":
             log("Wayland: глобальные клавиши через pynput не работают. Назначь в настройках рабочего стола "
                 "сочетание на команду «python python/dictate.py --toggle».")
+        if self.tray:
+            try:  # Windows прячет новые значки за стрелкой — скажем, что мы работаем
+                self.tray.icon.notify(f"Готов. {self.cfg['hotkey']} — диктовка, Esc — отмена.", "F5Voice")
+            except Exception:  # noqa: BLE001
+                pass
 
     def run(self):
         PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
