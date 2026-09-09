@@ -80,7 +80,7 @@ step "Зависимости (faster-whisper и остальное, около 2
 
 [[ -f "$HOME_DIR/config.json" ]] || cp "$SRC/python/config.example.json" "$HOME_DIR/config.json"
 MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('model') or 'large-v3-turbo')")"
-HOTKEY="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('hotkey') or '<ctrl>+<alt>+space')")"
+HOTKEY="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('hotkey') or '<ctrl>+<alt>+<space>')")"
 
 step "Модель $MODEL (первый раз около 1,6 ГБ, ниже будет прогресс)"
 PYTHONWARNINGS=ignore "$HOME_DIR/venv/bin/python" "$SRC/python/download_model.py" "$MODEL" \

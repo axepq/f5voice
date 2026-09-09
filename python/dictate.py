@@ -60,7 +60,7 @@ PID_PATH = HOME / "dictate.pid"
 IS_WINDOWS = platform.system() == "Windows"
 
 DEFAULTS = {
-    "hotkey": "<ctrl>+<alt>+space",   # формат pynput: <ctrl>, <alt>, <shift>, <cmd>, <f5>, буквы
+    "hotkey": "<ctrl>+<alt>+<space>",   # можно и «ctrl+alt+space» или «F5»: имена приводятся к формату pynput
     "languages": "ru,en",
     "alt_language_min_prob": 0.95,
     "model": "large-v3-turbo",         # small / medium быстрее на слабом CPU
@@ -288,6 +288,26 @@ def resolve_backend(cfg):
         else:
             log("крошечная модель работает и файлы целы — возможно, не хватает памяти; пробую ещё раз")
     raise RuntimeError(f"не удалось загрузить модель {model} ни на CUDA, ни на процессоре — см. лог выше")
+
+
+_KEY_ALIASES = {"control": "ctrl", "option": "alt", "opt": "alt", "win": "cmd", "windows": "cmd",
+                "super": "cmd", "command": "cmd", "escape": "esc", "return": "enter", "spacebar": "space"}
+
+
+def normalize_hotkey(spec):
+    """«ctrl+alt+space», «<ctrl>+<alt>+space», «F5» → формат pynput: <ctrl>+<alt>+<space>, <f5>.
+
+    pynput пишет специальные клавиши в угловых скобках, а буквы — как есть; голое
+    «space» он понимает как пять букв и падает.
+    """
+    parts = []
+    for raw in str(spec).split("+"):
+        name = raw.strip().strip("<>").lower()
+        if not name:
+            continue
+        name = _KEY_ALIASES.get(name, name)
+        parts.append(name if len(name) == 1 else f"<{name}>")
+    return "+".join(parts)
 
 
 def beep(kind="start"):
@@ -615,9 +635,10 @@ class App:
         from pynput import keyboard
 
         try:
-            self.hotkeys = keyboard.GlobalHotKeys({self.cfg["hotkey"]: self.toggle, "<esc>": self.cancel})
+            hotkey = normalize_hotkey(self.cfg["hotkey"])
+            self.hotkeys = keyboard.GlobalHotKeys({hotkey: self.toggle, "<esc>": self.cancel})
             self.hotkeys.start()
-            log(f"[READY] готов: {self.cfg['hotkey']} — диктовка, Esc — отмена, Ctrl+C — выход.")
+            log(f"[READY] готов: {hotkey} — диктовка, Esc — отмена, Ctrl+C — выход.")
         except Exception as e:  # noqa: BLE001
             log(f"[READY] глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":

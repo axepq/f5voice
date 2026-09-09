@@ -102,7 +102,7 @@ try {
     if (-not (Test-Path $Config)) { Copy-Item (Join-Path $Src "python\config.example.json") $Config }
     $Cfg = Get-Content $Config -Raw -Encoding UTF8 | ConvertFrom-Json
     $Model = if ($Cfg.model) { $Cfg.model } else { "large-v3-turbo" }
-    $Hotkey = if ($Cfg.hotkey) { $Cfg.hotkey } else { "<ctrl>+<alt>+space" }
+    $Hotkey = if ($Cfg.hotkey) { $Cfg.hotkey } else { "<ctrl>+<alt>+<space>" }
 
     Step "Model $Model (first time ~1.6 GB, progress below)"
     $env:PYTHONWARNINGS = "ignore"
