@@ -489,6 +489,65 @@ final class Worker {
 // MARK: - Плашка на экране
 
 enum HUDBars { case none, live, wave }
+
+/// Цикл полос «жидкого металла» (как в шейдере paper-design liquid metal, которым сделаны кнопки
+/// Vengeance UI): тонкая белая, тонкая тёмная, снова белая и длинный градиент от белого к почти чёрному.
+let chromeCycle: [(CGFloat, NSColor)] = [
+    (0.000, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.045, NSColor(calibratedWhite: 0.98, alpha: 1)),
+    (0.050, NSColor(calibratedWhite: 0.14, alpha: 1)), (0.080, NSColor(calibratedWhite: 0.14, alpha: 1)),
+    (0.085, NSColor(calibratedWhite: 0.98, alpha: 1)), (0.120, NSColor(calibratedWhite: 0.98, alpha: 1)),
+    (0.130, NSColor(calibratedWhite: 0.93, alpha: 1)), (0.480, NSColor(calibratedWhite: 0.62, alpha: 1)),
+    (0.780, NSColor(calibratedWhite: 0.28, alpha: 1)), (1.000, NSColor(calibratedWhite: 0.09, alpha: 1)),
+]
+
+/// Хромовое кольцо по краю плашки: угловой градиент из четырёх циклов полос, медленно вращается.
+final class MetalRing {
+    let layer = CALayer()
+    private let gradient = CAGradientLayer()
+    private let mask = CAShapeLayer()
+    let width: CGFloat = 3
+
+    init() {
+        gradient.type = .conic
+        gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        var colors: [CGColor] = []
+        var locations: [NSNumber] = []
+        let repetition = 4
+        for r in 0..<repetition {
+            for (t, c) in chromeCycle {
+                colors.append(c.cgColor)
+                locations.append(NSNumber(value: (Double(r) + Double(t)) / Double(repetition)))
+            }
+        }
+        gradient.colors = colors
+        gradient.locations = locations
+        mask.fillColor = nil
+        mask.strokeColor = NSColor.black.cgColor
+        mask.lineWidth = width
+        layer.mask = mask
+        layer.addSublayer(gradient)
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = -2 * Double.pi
+        spin.duration = 9
+        spin.repeatCount = .infinity
+        gradient.add(spin, forKey: "spin")
+    }
+
+    func layout(in bounds: CGRect, cornerRadius: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.frame = bounds
+        mask.frame = bounds
+        mask.path = CGPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2),
+                           cornerWidth: cornerRadius - width / 2, cornerHeight: cornerRadius - width / 2, transform: nil)
+        let side = hypot(bounds.width, bounds.height) + 8
+        gradient.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+        gradient.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        CATransaction.commit()
+    }
+}
 enum HUDAnim { case none, breathe, pulse, variableColor }
 
 /// Полоски: в режиме live бегут за микрофоном, в режиме wave — волна «думаю».
@@ -557,6 +616,7 @@ final class HUD {
     private let label = NSTextField(labelWithString: "")
     private var hideWork: DispatchWorkItem?
     private let height: CGFloat = 50
+    private var ring: MetalRing?
     let style: String
 
     init(style: String) {
@@ -591,19 +651,18 @@ final class HUD {
 
         // macOS 26: Liquid Glass (класс берём динамически, чтобы собираться и на macOS 14–15).
         // Стили: glass — тёмный оттенок, чтобы белый текст читался и поверх светлых окон;
-        // metal — серо-стальной оттенок с бликом сверху; clear — прозрачное стекло без оттенка; dark — почти чёрный.
+        // metal — тёмное стекло в хромовом кольце «жидкого металла» (MetalRing);
+        // clear — прозрачное стекло без оттенка; dark — почти чёрный.
         let tints: [String: NSColor?] = [
             "glass": NSColor(calibratedRed: 0.09, green: 0.08, blue: 0.12, alpha: 0.55),
-            "metal": NSColor(calibratedRed: 0.36, green: 0.37, blue: 0.42, alpha: 0.72),
+            "metal": NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.08, alpha: 0.72),
             "clear": nil,
             "dark": NSColor(calibratedWhite: 0.02, alpha: 0.88),
         ]
         if style == "metal" {
-            let shine = NSView(frame: NSRect(x: 0, y: bounds.height - 1.5, width: bounds.width, height: 1.5))
-            shine.wantsLayer = true
-            shine.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.45).cgColor
-            shine.autoresizingMask = [.width, .minYMargin]
-            content.addSubview(shine)
+            let r = MetalRing()
+            content.layer?.addSublayer(r.layer)
+            ring = r
         }
         if style == "clear" { label.textColor = .labelColor; icon.contentTintColor = .labelColor }
         if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
@@ -693,6 +752,7 @@ final class HUD {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
         panel.setFrame(NSRect(x: vf.midX - w / 2, y: vf.minY + 48, width: w, height: height), display: true)
+        ring?.layout(in: CGRect(x: 0, y: 0, width: w, height: height), cornerRadius: 25)
     }
 
     func hide() {

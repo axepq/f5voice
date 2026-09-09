@@ -571,10 +571,14 @@ class HUD(threading.Thread):
     COLORS = {"recording": "#ff4d4d", "transcribing": "#ffb347", "ok": "#5ad36b", "error": "#ff8a5c", "info": "#dddddd"}
     STYLES = {  # фон плашки, цвет текста, тёмная ли тема для стекла DWM
         "glass": ("#16161c", "#ffffff", True),
-        "metal": ("#2a2c33", "#f2f2f2", True),
+        "metal": ("#111114", "#f2f2f2", True),   # тёмное стекло в хромовом кольце «жидкого металла»
         "light": ("#f2f2f5", "#111111", False),
         "dark": ("#0d0d10", "#ffffff", True),
     }
+    # Цикл полос как в шейдере liquid metal (paper-design, кнопки Vengeance UI): тонкая белая,
+    # тонкая тёмная, снова белая и длинный градиент от белого к почти чёрному.
+    CHROME = [(0.000, 250), (0.045, 250), (0.050, 36), (0.080, 36), (0.085, 250), (0.120, 250),
+              (0.130, 237), (0.480, 158), (0.780, 72), (1.000, 23)]
 
     def __init__(self, app, level_fn, style="glass"):
         super().__init__(daemon=True)
@@ -600,11 +604,17 @@ class HUD(threading.Thread):
         self.q.put(("settings", None, None, None))
 
     def _apply_windows_glass(self, root):
-        """Windows 11: акриловое стекло и скруглённые углы через DWM; иначе просто тёмная панель."""
+        """Windows 11: акриловое стекло и скруглённые углы через DWM; иначе просто тёмная панель.
+        Стиль metal — без акрила: снаружи капсулы окно прозрачное, внутри тёмное стекло и кольцо."""
         if not IS_WINDOWS:
             return
         try:
             root.update_idletasks()
+            if self.style == "metal":
+                root.attributes("-transparentcolor", "#010203")
+                self.canvas.configure(bg="#010203")
+                self.cutout = True
+                return
             hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
             dwm = ctypes.windll.dwmapi
             corner = ctypes.c_int(2)  # DWMWCP_ROUND
@@ -637,7 +647,9 @@ class HUD(threading.Thread):
                 pass
             self.W, self.H = 460, 56
             bg, self.fg, _ = self.STYLES[self.style]
+            self.bg = bg
             self.glass = False
+            self.cutout = False
             self.canvas = tk.Canvas(root, width=self.W, height=self.H, bg=bg, highlightthickness=0)
             self.canvas.pack()
             sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -675,17 +687,61 @@ class HUD(threading.Thread):
             self._draw()
         self.root.after(40, self._tick)
 
+    @classmethod
+    def chrome(cls, t):
+        """Яркость хрома в точке t цикла (0…1) → цвет."""
+        t -= math.floor(t)
+        stops = cls.CHROME
+        for (t0, v0), (t1, v1) in zip(stops, stops[1:]):
+            if t <= t1:
+                v = v0 + (v1 - v0) * (t - t0) / max(t1 - t0, 1e-6)
+                break
+        else:
+            v = stops[-1][1]
+        v = int(max(0, min(255, v)))
+        return f"#{v:02x}{v:02x}{min(255, v + 4):02x}"
+
+    def _pill_points(self, n, inset):
+        """n точек по периметру плашки-капсулы (по часовой, старт слева вверху)."""
+        w, h = self.W - 2 * inset, self.H - 2 * inset
+        r = h / 2
+        straight = w - 2 * r
+        total = 2 * straight + 2 * math.pi * r
+        pts = []
+        for i in range(n + 1):
+            d = total * i / n
+            if d < straight:
+                x, y = r + d, 0
+            elif d < straight + math.pi * r:
+                a = (d - straight) / r - math.pi / 2
+                x, y = w - r + r * math.cos(a), r + r * math.sin(a)
+            elif d < 2 * straight + math.pi * r:
+                x, y = w - r - (d - straight - math.pi * r), h
+            else:
+                a = (d - 2 * straight - math.pi * r) / r + math.pi / 2
+                x, y = r + r * math.cos(a), r + r * math.sin(a)
+            pts.append((x + inset, y + inset))
+        return pts
+
+    def _draw_metal_ring(self, c, width=3, repetition=4):
+        """Хромовое кольцо по краю: четыре цикла полос бегут по периметру."""
+        pts = self._pill_points(96, width / 2 + 1)
+        n = len(pts) - 1
+        shift = self.phase * 0.012
+        for i in range(n):
+            (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+            c.create_line(x0, y0, x1, y1, fill=self.chrome(i / n * repetition + shift), width=width, capstyle="round")
+
     def _draw(self):
         c = self.canvas
         c.delete("all")
         self.phase += 0.18
         color = self.COLORS.get(self.state, "#ffffff")
         cy = self.H / 2
-        if self.style == "metal":  # металлический блик поверх стекла
-            for i in range(0, self.W, 8):
-                shade = int(52 + 30 * math.sin(i / 90 + self.phase * 0.05))
-                c.create_rectangle(i, 0, i + 8, self.H, fill=f"#{shade:02x}{shade + 2:02x}{shade + 8:02x}", outline="")
-            c.create_rectangle(0, 0, self.W, 2, fill="#8a8d99", outline="")
+        if self.style == "metal":
+            if self.cutout:  # капсула на прозрачном окне
+                c.create_polygon(*[v for xy in self._pill_points(96, 1) for v in xy], fill=self.bg, outline="")
+            self._draw_metal_ring(c)
         r = 7 + (2.5 * abs(math.sin(self.phase * 0.6)) if self.state == "recording" else 0)
         c.create_oval(22 - r, cy - r, 22 + r, cy + r, fill=color, outline="")
         x = 46
