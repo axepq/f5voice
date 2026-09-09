@@ -61,7 +61,8 @@ else
         rm -rf "$SRC"
         mv "$SRC.new" "$SRC"
     fi
-    if [[ -r /dev/tty ]]; then exec bash "$SRC/install-macos.sh" </dev/tty; else exec bash "$SRC/install-macos.sh"; fi
+    # Ввод с терминала — для sudo и вопросов; если терминала нет (автоматизация), без него.
+    if { : </dev/tty; } 2>/dev/null; then exec bash "$SRC/install-macos.sh" </dev/tty; else exec bash "$SRC/install-macos.sh"; fi
 fi
 
 step "Python-окружение в $HOME_DIR/venv"

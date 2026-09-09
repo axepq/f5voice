@@ -47,7 +47,8 @@ else
     mv "$TMP/f5voice-main" "$SRC"
     rmdir "$TMP" 2>/dev/null || true
     echo "Исходники: $SRC"
-    if [[ -r /dev/tty ]]; then exec bash "$SRC/install-linux.sh" </dev/tty; else exec bash "$SRC/install-linux.sh"; fi
+    # Ввод с терминала — для sudo и вопросов; если терминала нет (автоматизация), без него.
+    if { : </dev/tty; } 2>/dev/null; then exec bash "$SRC/install-linux.sh" </dev/tty; else exec bash "$SRC/install-linux.sh"; fi
 fi
 
 SUDO=""
