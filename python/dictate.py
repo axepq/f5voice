@@ -424,8 +424,8 @@ class Recognizer:
         alt = max(self.langs[1:], key=lambda l: scores[l])
         return (alt if scores[alt] >= self.alt_min else self.langs[0]), scores
 
-    def run(self, audio, lang, prompt=None, temperature=(0.0, 0.2, 0.4, 0.6)):
-        segments, _info = self.model.transcribe(
+    def run(self, audio, lang, prompt=None, temperature=(0.0, 0.2, 0.4, 0.6), with_info=False):
+        segments, info = self.model.transcribe(
             audio,
             language=lang,
             task="transcribe",
@@ -435,13 +435,22 @@ class Recognizer:
             beam_size=self.beam,
             vad_filter=False,
         )
-        return [(s.start, s.end, s.text, {"compression_ratio": s.compression_ratio,
+        segs = [(s.start, s.end, s.text, {"compression_ratio": s.compression_ratio,
                                           "no_speech_prob": s.no_speech_prob, "avg_logprob": s.avg_logprob})
                 for s in segments]
+        return (segs, info) if with_info else segs
 
     def recognize(self, audio):
-        lang, scores = self.pick_language(audio)
-        segs = self.run(audio, lang)
+        # Один проход: язык модель определяет по тому же прогону энкодера, что и распознаёт
+        # (отдельный detect стоил ещё один проход — на процессоре это лишние секунды).
+        segs, info = self.run(audio, None, with_info=True)
+        primary = self.langs[0]
+        lang = info.language
+        probs = dict(info.all_language_probs or [])
+        scores = {l: round(float(probs.get(l, 0.0)), 3) for l in self.langs}
+        if lang != primary and (lang not in self.langs or scores.get(lang, 0.0) < self.alt_min):
+            lang = primary  # чужой или неуверенный язык — распознаём заново на основном
+            segs = self.run(audio, primary)
         duration = audio.size / RATE
 
         def redecode(start, end, context):
