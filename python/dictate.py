@@ -278,6 +278,8 @@ def resolve_backend(cfg):
         ok_tiny, detail = _probe("tiny", "cpu", "float32")
         if not ok_tiny:
             version = fallback_versions[attempt]
+            if "ctranslate2" in sys.modules:
+                log("! ctranslate2 уже загружен в этот процесс — после замены версии перезапусти F5Voice")
             log(f"даже крошечная модель не грузится ({detail}) — ставлю CTranslate2 {version} "
                 f"(и setuptools<80: старым версиям нужен pkg_resources)")
             subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", f"ctranslate2=={version}", "setuptools<80"],
@@ -385,14 +387,16 @@ def beep(kind="start"):
 
 class Recognizer:
     def __init__(self, cfg):
-        from faster_whisper import WhisperModel
-
         self.langs = tuple(x.strip() for x in cfg["languages"].split(",") if x.strip()) or ("ru",)
         self.alt_min = float(cfg["alt_language_min_prob"])
         self.prompt = cfg["prompt"] or DEFAULT_PROMPT
+        # Сначала выбираем рабочий бэкенд (может переустановить ctranslate2), и только потом
+        # импортируем библиотеку: загруженную DLL pip заменить не может, старая версия упала бы.
         device, compute_type = resolve_backend(cfg)
         if device == "cuda":
             _enable_pip_cuda_libs()
+        from faster_whisper import WhisperModel
+
         t = time.time()
         log(f"загружаю модель {cfg['model']} ({device}, {compute_type})…")
         self.model = WhisperModel(cfg["model"], device=device, compute_type=compute_type)

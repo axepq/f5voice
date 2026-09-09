@@ -1,8 +1,11 @@
 faster-whisper>=1.1
+# CTranslate2 4.8 падает при загрузке любой модели на Intel 12-го поколения (Windows); 4.5 проверен.
+ctranslate2>=4.4,<4.6; python_version < "3.13"
+ctranslate2>=4.6; python_version >= "3.13"
+setuptools<80
 sounddevice
 pynput
 numpy
 pyperclip
 pystray
 Pillow
-setuptools<80
