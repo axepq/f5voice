@@ -58,7 +58,7 @@ Ctrl+Alt+Space — запись (короткий сигнал), ещё раз �
 | `hotkey` | формат pynput: `<ctrl>+<alt>+space`, `<f5>`, `<cmd>+<shift>+d` |
 | `languages` | языки через запятую, первый — основной |
 | `model` | `large-v3-turbo`, `medium`, `small` (быстрее на слабом CPU), или репозиторий Hugging Face |
-| `device`, `compute_type` | `auto`; для NVIDIA `cuda` + `float16` (нужны CUDA 12 и cuDNN 9); для CPU `cpu` + `int8` |
+| `device`, `compute_type` | `auto`: при первом запуске CUDA проверяется в отдельном процессе; без библиотек программа переходит на `cpu` и записывает это в настройки. `compute_type` лучше оставить `auto` |
 | `typing` | `type` — печатать посимвольно; `paste` — через буфер обмена, если символы теряются |
 | `newline` | что нажимать для «новая строка»: `shift+enter`, `enter`, `ctrl+enter` |
 | `input_device` | номер или имя микрофона из `--list-devices` |
@@ -83,3 +83,24 @@ Wayland-приложения. Обход: в настройках рабочег
 сочетание клавиш на команду `dictate.py --toggle` (полный путь выше), а в
 config.json поставить `"typing": "paste"` и установить `wl-clipboard`.
 Под X11 всё работает напрямую.
+
+## Видеокарта NVIDIA
+
+Без библиотек cuBLAS и cuDNN для CUDA 12 CTranslate2 на Windows не выдаёт
+ошибку, а падает, поэтому F5Voice проверяет CUDA в отдельном процессе и при
+неудаче работает на процессоре, записав `"device": "cpu"` в настройки.
+Чтобы включить видеокарту (драйвер NVIDIA не старее 525):
+
+Windows, PowerShell:
+```
+& "$HOME\.f5voice\venv\Scripts\python.exe" -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+Linux:
+```
+~/.f5voice/venv/bin/pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+Это около 1 ГБ. Потом в `~/.f5voice/config.json` поставить `"device": "auto"`
+и перезапустить F5Voice: библиотеки из этих пакетов программа находит сама,
+проверка пройдёт, и в логе появится «CUDA работает».

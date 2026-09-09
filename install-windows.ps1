@@ -158,7 +158,7 @@ try {
     Write-Host "  It lives as a microphone icon in the tray (bottom right, maybe behind the ^ arrow)."
     Write-Host "  Shortcuts 'F5Voice' on the Desktop and in the Start menu start it again if you closed it."
     Write-Host "  Settings: $Config (hotkey, model, languages). Log: $Log"
-    Write-Host "  NVIDIA GPU: set device=cuda and compute_type=float16 in config.json (needs CUDA 12 + cuDNN 9)."
+    Write-Host "  NVIDIA GPU: works on CPU by default; to use the GPU see python/README.md (needs cuBLAS + cuDNN for CUDA 12)."
     Finish 0
 } catch {
     $raw = $_.Exception.Message

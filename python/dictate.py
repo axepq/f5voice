@@ -15,10 +15,13 @@
 что-то падает — пришлите ~/.f5voice/f5voice.log.
 """
 import argparse
+import ctypes
+import glob
 import json
 import os
 import platform
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -88,6 +91,100 @@ def load_config():
     return cfg
 
 
+def save_config(cfg):
+    try:
+        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        log(f"! не смог записать {CONFIG_PATH}: {e}")
+
+
+def _enable_pip_cuda_libs():
+    """Подхватывает cuBLAS/cuDNN из pip-пакетов nvidia-cublas-cu12 и nvidia-cudnn-cu12, если они стоят.
+
+    Windows: каталоги с DLL добавляются в поиск. Linux: библиотеки нужны в LD_LIBRARY_PATH
+    до старта процесса, поэтому процесс перезапускает себя с нужной переменной.
+    """
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("nvidia")
+    except (ImportError, ValueError):
+        return
+    if not spec or not spec.submodule_search_locations:
+        return
+    dirs = []
+    for base in spec.submodule_search_locations:
+        for sub in ("cublas", "cudnn"):
+            for d in ("bin", "lib"):
+                path = Path(base) / sub / d
+                if path.is_dir():
+                    dirs.append(str(path))
+    if not dirs:
+        return
+    if IS_WINDOWS:
+        for d in dirs:
+            try:
+                os.add_dll_directory(d)
+            except (AttributeError, OSError):
+                pass
+        os.environ["PATH"] = os.pathsep.join(dirs) + os.pathsep + os.environ.get("PATH", "")
+    elif platform.system() == "Linux" and not os.environ.get("F5VOICE_LD_SET"):
+        current = os.environ.get("LD_LIBRARY_PATH", "")
+        if any(d not in current for d in dirs):
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(dirs + ([current] if current else []))
+            os.environ["F5VOICE_LD_SET"] = "1"
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def probe_cuda(model, compute_type):
+    """Дочерний процесс: загрузить модель на CUDA и прогнать пустой звук. Падение — только здесь."""
+    if IS_WINDOWS:
+        try:
+            ctypes.windll.kernel32.SetErrorMode(0x8003)  # без окна «программа перестала работать»
+        except Exception:  # noqa: BLE001
+            pass
+    _enable_pip_cuda_libs()
+    from faster_whisper import WhisperModel
+
+    m = WhisperModel(model, device="cuda", compute_type=compute_type)
+    segments, _ = m.transcribe(np.zeros(RATE, dtype=np.float32), language="ru")
+    list(segments)
+    print("cuda ok")
+
+
+def resolve_device(cfg):
+    """cpu — как есть; cuda/auto — проверяем CUDA в отдельном процессе.
+
+    Без cuBLAS/cuDNN CTranslate2 на Windows не бросает исключение, а роняет процесс
+    (0xC0000005). Поэтому пробуем в дочернем, а результат записываем в config.json,
+    чтобы не проверять при каждом запуске. Вернуть проверку: "device": "auto".
+    """
+    want = str(cfg.get("device") or "auto").lower()
+    if want == "cpu":
+        return "cpu"
+    if want == "cuda" and cfg.get("device_checked") == "cuda":
+        return "cuda"
+    log("проверяю CUDA в отдельном процессе…")
+    try:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--probe-cuda", cfg["model"],
+                            "--compute-type", str(cfg.get("compute_type") or "auto")],
+                           capture_output=True, text=True, timeout=900)
+        ok, detail = r.returncode == 0, (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [f"код {r.returncode}"]
+    except subprocess.TimeoutExpired:
+        ok, detail = False, ["не уложилась в 15 минут"]
+    if ok:
+        log("CUDA работает — распознаю на видеокарте")
+        cfg["device"], cfg["device_checked"] = "cuda", "cuda"
+        save_config(cfg)
+        return "cuda"
+    log(f"CUDA не заработала ({detail[0]}) — работаю на процессоре. Для видеокарты NVIDIA см. README: "
+        "нужны cuBLAS и cuDNN для CUDA 12.")
+    cfg["device"] = "cpu"
+    cfg["device_note"] = "auto → cpu: CUDA не прошла проверку. Поставь \"auto\", чтобы проверить снова."
+    save_config(cfg)
+    return "cpu"
+
+
 def beep(kind="start"):
     if IS_WINDOWS:
         try:
@@ -108,9 +205,12 @@ class Recognizer:
         self.langs = tuple(x.strip() for x in cfg["languages"].split(",") if x.strip()) or ("ru",)
         self.alt_min = float(cfg["alt_language_min_prob"])
         self.prompt = cfg["prompt"] or DEFAULT_PROMPT
+        device = resolve_device(cfg)
+        if device == "cuda":
+            _enable_pip_cuda_libs()
         t = time.time()
-        log(f"загружаю модель {cfg['model']} ({cfg['device']}, {cfg['compute_type']})…")
-        self.model = WhisperModel(cfg["model"], device=cfg["device"], compute_type=cfg["compute_type"])
+        log(f"загружаю модель {cfg['model']} ({device}, {cfg['compute_type']})…")
+        self.model = WhisperModel(cfg["model"], device=device, compute_type=cfg["compute_type"])
         warm = np.random.default_rng(0).normal(0, 1e-4, RATE).astype(np.float32)  # нули дают предупреждения numpy
         self.run(warm, self.langs[0])
         log(f"модель готова за {time.time() - t:.1f} с")
@@ -499,7 +599,13 @@ def main():
     ap.add_argument("--cancel", action="store_true", help="отменить запись в работающем экземпляре")
     ap.add_argument("--no-tray", action="store_true", help="без значка в области уведомлений")
     ap.add_argument("--check", action="store_true", help="проверить окружение, микрофон и модель в консоли")
+    ap.add_argument("--probe-cuda", metavar="MODEL", help=argparse.SUPPRESS)
+    ap.add_argument("--compute-type", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if args.probe_cuda:
+        probe_cuda(args.probe_cuda, args.compute_type or "auto")
+        return
 
     if args.toggle:
         sys.exit(send_signal("SIGUSR1"))
