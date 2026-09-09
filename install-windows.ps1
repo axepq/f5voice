@@ -27,6 +27,8 @@ function New-Shortcut($path, $target, $arguments, $workdir, $desc) {
     $lnk.Arguments = $arguments
     $lnk.WorkingDirectory = $workdir
     $lnk.Description = $desc
+    $ico = Join-Path $Src "python\F5Voice.ico"
+    if (Test-Path $ico) { $lnk.IconLocation = "$ico,0" }
     $lnk.Save()
 }
 

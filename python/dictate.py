@@ -77,6 +77,7 @@ DEFAULTS = {
     "input_device": None,              # номер или имя из --list-devices, None — по умолчанию
     "tray": True,                      # значок в области уведомлений (нужны pystray и Pillow)
     "hud": True,                       # плашка внизу экрана: запись, уровень, распознавание, результат
+    "style": "glass",                  # glass | metal | light | dark — вид плашки (стекло через DWM на Windows 11)
     "cpu_threads": 0,                  # потоков для CTranslate2 на процессоре, 0 — по числу ядер
     "beam_size": 0,                    # ширина поиска, 0 — авто: 1 на процессоре (быстро), 5 на видеокарте
 }
@@ -566,10 +567,19 @@ class HUD(threading.Thread):
     """Плашка внизу экрана, как на маке: точка, полоски уровня, текст. tkinter в своём потоке."""
 
     COLORS = {"recording": "#ff4d4d", "transcribing": "#ffb347", "ok": "#5ad36b", "error": "#ff8a5c", "info": "#dddddd"}
+    STYLES = {  # фон плашки, цвет текста, тёмная ли тема для стекла DWM
+        "glass": ("#16161c", "#ffffff", True),
+        "metal": ("#2a2c33", "#f2f2f2", True),
+        "light": ("#f2f2f5", "#111111", False),
+        "dark": ("#0d0d10", "#ffffff", True),
+    }
 
-    def __init__(self, level_fn):
+    def __init__(self, level_fn, style="glass", on_settings_saved=None, cfg=None):
         super().__init__(daemon=True)
         self.level_fn = level_fn
+        self.style = style if style in self.STYLES else "glass"
+        self.on_settings_saved = on_settings_saved
+        self.cfg = cfg or {}
         self.q = queue.Queue()
         self.state = None
         self.text = ""
@@ -583,6 +593,30 @@ class HUD(threading.Thread):
 
     def hide(self):
         self.q.put(("hide", None, None, None))
+
+    def open_settings(self):
+        self.q.put(("settings", None, None, None))
+
+    def _apply_windows_glass(self, root):
+        """Windows 11: акриловое стекло и скруглённые углы через DWM; иначе просто тёмная панель."""
+        if not IS_WINDOWS:
+            return
+        try:
+            root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            dwm = ctypes.windll.dwmapi
+            corner = ctypes.c_int(2)  # DWMWCP_ROUND
+            dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), 4)
+            if self.style != "dark":
+                dark = ctypes.c_int(1 if self.STYLES[self.style][2] else 0)
+                dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)
+                backdrop = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW — акрил
+                if dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(backdrop), 4) == 0:
+                    root.attributes("-transparentcolor", "#010203")
+                    self.canvas.configure(bg="#010203")
+                    self.glass = True
+        except Exception as e:  # noqa: BLE001
+            log(f"стекло DWM недоступно ({e}) — обычная панель")
 
     def run(self):
         try:
@@ -600,11 +634,15 @@ class HUD(threading.Thread):
             except tk.TclError:
                 pass
             self.W, self.H = 460, 56
-            self.canvas = tk.Canvas(root, width=self.W, height=self.H, bg="#141418", highlightthickness=0)
+            bg, self.fg, _ = self.STYLES[self.style]
+            self.glass = False
+            self.canvas = tk.Canvas(root, width=self.W, height=self.H, bg=bg, highlightthickness=0)
             self.canvas.pack()
             sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
             root.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 80}")
             self.root = root
+            self.tk = tk
+            self._apply_windows_glass(root)
             root.after(40, self._tick)
             root.mainloop()
         except Exception as e:  # noqa: BLE001
@@ -621,6 +659,8 @@ class HUD(threading.Thread):
                         self.hist.extend([0.0] * 10)
                     self.root.deiconify()
                     self.root.lift()
+                elif cmd == "settings":
+                    self._settings_window()
                 else:
                     self.state = None
                     self.root.withdraw()
@@ -639,6 +679,11 @@ class HUD(threading.Thread):
         self.phase += 0.18
         color = self.COLORS.get(self.state, "#ffffff")
         cy = self.H / 2
+        if self.style == "metal":  # металлический блик поверх стекла
+            for i in range(0, self.W, 8):
+                shade = int(52 + 30 * math.sin(i / 90 + self.phase * 0.05))
+                c.create_rectangle(i, 0, i + 8, self.H, fill=f"#{shade:02x}{shade + 2:02x}{shade + 8:02x}", outline="")
+            c.create_rectangle(0, 0, self.W, 2, fill="#8a8d99", outline="")
         r = 7 + (2.5 * abs(math.sin(self.phase * 0.6)) if self.state == "recording" else 0)
         c.create_oval(22 - r, cy - r, 22 + r, cy + r, fill=color, outline="")
         x = 46
@@ -648,9 +693,77 @@ class HUD(threading.Thread):
             for i in range(10):
                 v = self.hist[i] if self.state == "recording" else 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
                 h = 3 + 20 * max(0.0, min(1.0, v))
-                c.create_rectangle(x + i * 6, cy - h / 2, x + i * 6 + 3, cy + h / 2, fill="#ffffff", outline="")
+                c.create_rectangle(x + i * 6, cy - h / 2, x + i * 6 + 3, cy + h / 2, fill=self.fg, outline="")
             x += 70
-        c.create_text(x, cy, text=self.text, anchor="w", fill="#ffffff", font=("Segoe UI", 12))
+        c.create_text(x, cy, text=self.text, anchor="w", fill=self.fg, font=("Segoe UI", 12))
+
+    def _settings_window(self):
+        """Окно настроек: сочетание (можно записать нажатием), стиль, языки, модель, пробел, перенос."""
+        tk = self.tk if hasattr(self, "tk") else __import__("tkinter")
+        from tkinter import ttk
+
+        win = tk.Toplevel(self.root)
+        win.title("F5Voice — настройки")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        cfg = self.cfg
+        rows = [("Сочетание клавиш", "hotkey", None), ("Стиль плашки", "style", list(self.STYLES)),
+                ("Языки (первый — основной)", "languages", None),
+                ("Модель", "model", ["large-v3-turbo", "medium", "small"]),
+                ("Перенос строки клавишей", "newline", ["shift+enter", "enter", "ctrl+enter"])]
+        vars_ = {}
+        for i, (label, key, options) in enumerate(rows):
+            ttk.Label(win, text=label).grid(row=i, column=0, sticky="w", padx=10, pady=4)
+            v = tk.StringVar(value=str(cfg.get(key, "")))
+            vars_[key] = v
+            if options:
+                ttk.Combobox(win, textvariable=v, values=options, width=28).grid(row=i, column=1, padx=10, pady=4)
+            else:
+                ttk.Entry(win, textvariable=v, width=31).grid(row=i, column=1, padx=10, pady=4)
+        trailing = tk.BooleanVar(value=bool(cfg.get("trailing_space", True)))
+        ttk.Checkbutton(win, text="Пробел после надиктованного", variable=trailing).grid(row=len(rows), column=0, columnspan=2, sticky="w", padx=10)
+        hint = ttk.Label(win, text="Нажмите «Записать» и сочетание на клавиатуре, например Ctrl+Alt+D", foreground="#666")
+        hint.grid(row=len(rows) + 1, column=0, columnspan=2, sticky="w", padx=10)
+
+        def record():
+            from pynput import keyboard
+
+            hint.configure(text="Нажмите сочетание…")
+            held = set()
+
+            def name(k):
+                if isinstance(k, keyboard.Key):
+                    n = k.name.replace("_l", "").replace("_r", "").replace("cmd", "win")
+                    return n
+                return (getattr(k, "char", None) or "").lower() or None
+
+            def on_press(k):
+                n = name(k)
+                if n in ("ctrl", "alt", "shift", "win", "alt_gr"):
+                    held.add("alt" if n == "alt_gr" else n)
+                    return True
+                if n:
+                    combo = "+".join(sorted(held, key=["ctrl", "alt", "shift", "win"].index) + [n])
+                    self.root.after(0, lambda: (vars_["hotkey"].set(combo), hint.configure(text=f"Записано: {combo}")))
+                    return False
+                return True
+
+            keyboard.Listener(on_press=on_press).start()
+
+        ttk.Button(win, text="Записать", command=record).grid(row=0, column=2, padx=6)
+
+        def save():
+            for key, v in vars_.items():
+                cfg[key] = v.get().strip()
+            cfg["trailing_space"] = bool(trailing.get())
+            if cfg.get("model") != self.cfg.get("model"):
+                cfg.pop("backend_checked", None)
+            save_config(cfg)
+            win.destroy()
+            if self.on_settings_saved:
+                self.on_settings_saved()
+
+        ttk.Button(win, text="Сохранить и перезапустить", command=save).grid(row=len(rows) + 2, column=0, columnspan=3, pady=10)
 
 
 def pretty_hotkey(normalized):
@@ -672,19 +785,23 @@ class Tray:
         self.app = app
         menu = pystray.Menu(
             pystray.MenuItem("Запись / стоп", lambda: app.toggle()),
-            pystray.MenuItem("Настройки (config.json)", lambda: open_path(CONFIG_PATH)),
+            pystray.MenuItem("Настройки…", lambda: app.hud.open_settings() if app.hud else open_path(CONFIG_PATH)),
+            pystray.MenuItem("Файл настроек (config.json)", lambda: open_path(CONFIG_PATH)),
             pystray.MenuItem("Лог", lambda: open_path(LOG_PATH)),
             pystray.MenuItem("Выход", lambda: app.quit()),
         )
         self.icon = pystray.Icon("F5Voice", self._image("idle"), "F5Voice", menu)
 
     def _image(self, state):
-        img = self.Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        d = self.ImageDraw.Draw(img)
-        d.ellipse((6, 6, 58, 58), fill=self.COLORS[state] + (255,))
-        d.rounded_rectangle((25, 14, 39, 38), radius=7, fill=(255, 255, 255, 255))  # капсула микрофона
-        d.arc((19, 24, 45, 46), 0, 180, fill=(255, 255, 255, 255), width=3)
-        d.line((32, 46, 32, 52), fill=(255, 255, 255, 255), width=3)
+        icon_png = Path(__file__).resolve().parent / "F5Voice.png"
+        try:
+            img = self.Image.open(icon_png).convert("RGBA").resize((64, 64), self.Image.LANCZOS)
+        except Exception:  # noqa: BLE001
+            img = self.Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            self.ImageDraw.Draw(img).ellipse((6, 6, 58, 58), fill=self.COLORS[state] + (255,))
+        if state != "idle":  # точка состояния в углу
+            d = self.ImageDraw.Draw(img)
+            d.ellipse((40, 40, 62, 62), fill=self.COLORS[state] + (255,), outline=(255, 255, 255, 255), width=2)
         return img
 
     def set_state(self, state):
@@ -728,7 +845,7 @@ class App:
             log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
                 "выбрать: \"input_device\" в config.json")
             sys.exit(1)
-        self.hud = HUD(lambda: self.recorder.level) if cfg.get("hud", True) else None
+        self.hud = HUD(lambda: self.recorder.level, cfg.get("style", "glass"), self.restart, cfg) if cfg.get("hud", True) else None
         self.hotkey_title = pretty_hotkey(normalize_hotkey(cfg["hotkey"]))
         self.recognizer = Recognizer(cfg)
         self.typist = Typist(cfg)
@@ -818,6 +935,15 @@ class App:
             with self.lock:
                 if self.state == "transcribing":  # если уже пишем новую — не сбивать
                     self._set_state("idle")
+
+    def restart(self):
+        """После смены настроек: новый экземпляр с --log, этот выходит."""
+        log("перезапуск с новыми настройками")
+        exe = sys.executable
+        if IS_WINDOWS and exe.lower().endswith("python.exe"):
+            exe = exe[:-10] + "pythonw.exe"
+        subprocess.Popen([exe, os.path.abspath(__file__), "--log"], cwd=str(HOME))
+        self.quit()
 
     def quit(self):
         log("выход")

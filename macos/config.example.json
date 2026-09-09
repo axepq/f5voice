@@ -8,5 +8,6 @@
   "max_record_seconds": 180,
   "idle_unload_minutes": 15,
   "newline_in_terminals": "option",
-  "newline_elsewhere": "shift"
+  "newline_elsewhere": "shift",
+  "style": "glass"
 }

@@ -42,7 +42,21 @@ struct Config {
     var idleUnloadMinutes = 15.0
     var newlineInTerminals = "option"   // option | shift | none
     var newlineElsewhere = "shift"
+    var style = "glass"                 // glass | metal | clear | dark
     var loadError: String?
+
+    /// Дописывает ключи в config.json, остальное сохраняя как есть.
+    static func save(_ updates: [String: Any]) {
+        var obj: [String: Any] = [:]
+        if let data = FileManager.default.contents(atPath: configPath),
+           let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            obj = parsed
+        }
+        for (k, v) in updates { obj[k] = v }
+        if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: configPath))
+        }
+    }
 
     static func load() -> Config {
         var c = Config()
@@ -71,6 +85,7 @@ struct Config {
         if let v = obj["idle_unload_minutes"] as? Double { c.idleUnloadMinutes = v }
         if let v = obj["newline_in_terminals"] as? String { c.newlineInTerminals = v }
         if let v = obj["newline_elsewhere"] as? String { c.newlineElsewhere = v }
+        if let v = obj["style"] as? String, !v.isEmpty { c.style = v }
         return c
     }
 
@@ -536,8 +551,10 @@ final class HUD {
     private let label = NSTextField(labelWithString: "")
     private var hideWork: DispatchWorkItem?
     private let height: CGFloat = 50
+    let style: String
 
-    init() {
+    init(style: String) {
+        self.style = style
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 50),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -567,12 +584,27 @@ final class HUD {
         content.addSubview(label)
 
         // macOS 26: Liquid Glass (класс берём динамически, чтобы собираться и на macOS 14–15).
-        // Тёмный оттенок нужен, чтобы белый текст читался и поверх светлых окон.
-        let tint = NSColor(calibratedRed: 0.09, green: 0.08, blue: 0.12, alpha: 0.55)
+        // Стили: glass — тёмный оттенок, чтобы белый текст читался и поверх светлых окон;
+        // metal — серо-стальной оттенок с бликом сверху; clear — прозрачное стекло без оттенка; dark — почти чёрный.
+        let tints: [String: NSColor?] = [
+            "glass": NSColor(calibratedRed: 0.09, green: 0.08, blue: 0.12, alpha: 0.55),
+            "metal": NSColor(calibratedRed: 0.36, green: 0.37, blue: 0.42, alpha: 0.72),
+            "clear": nil,
+            "dark": NSColor(calibratedWhite: 0.02, alpha: 0.88),
+        ]
+        if style == "metal" {
+            let shine = NSView(frame: NSRect(x: 0, y: bounds.height - 1.5, width: bounds.width, height: 1.5))
+            shine.wantsLayer = true
+            shine.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.45).cgColor
+            shine.autoresizingMask = [.width, .minYMargin]
+            content.addSubview(shine)
+        }
+        if style == "clear" { label.textColor = .labelColor; icon.contentTintColor = .labelColor }
         if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
             let glass = glassClass.init(frame: bounds)
             glass.setValue(25.0, forKey: "cornerRadius")
-            glass.setValue(tint, forKey: "tintColor")
+            if let tint = tints[style] ?? nil { glass.setValue(tint, forKey: "tintColor") }
+            if style == "clear" { glass.setValue(1, forKey: "style") }  // NSGlassEffectView.Style.clear
             glass.setValue(content, forKey: "contentView")
             glass.autoresizingMask = [.width, .height]
             panel.contentView = glass
@@ -680,7 +712,8 @@ final class App: NSObject, NSApplicationDelegate {
     private var tapFailures = 0
     private var statusItem: NSStatusItem!
     private var hotkeyItem: NSMenuItem!
-    private let hud = HUD()
+    private lazy var hud = HUD(style: config.style)
+    var capturing = false
     private let recorder = Recorder()
     private lazy var worker = Worker(config: config)
     private var accessibilityOK = false
@@ -743,6 +776,11 @@ final class App: NSObject, NSApplicationDelegate {
             if hotkey.fKey != nil { applyRemap(fKey: hotkey.fKey, on: true) }
         }
         hotkeyItem.title = hotkeyTitle()
+        if old.style != config.style {
+            hud.hide()
+            hud = HUD(style: config.style)
+        }
+        setupStatusItem()
         worker.config = config
         if old.workerSignature != config.workerSignature {
             log("настройки модели изменились — перезапускаю воркер")
@@ -751,6 +789,51 @@ final class App: NSObject, NSApplicationDelegate {
         }
         hud.show("Настройки перечитаны: \(hotkey.title)", symbol: "checkmark.circle.fill", tint: .systemGreen, hideAfter: 3)
         log("настройки перечитаны")
+    }
+
+    @objc private func pickHotkey(_ sender: NSMenuItem) {
+        guard let spec = sender.representedObject as? String else { return }
+        Config.save(["hotkey": spec])
+        reloadConfig()
+    }
+
+    @objc private func pickStyle(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        Config.save(["style": name])
+        reloadConfig()
+    }
+
+    @objc private func toggleTrailingSpace() {
+        Config.save(["trailing_space": !config.trailingSpace])
+        reloadConfig()
+    }
+
+    @objc private func captureHotkey() {
+        capturing = true
+        hud.show("Нажмите новое сочетание клавиш… Esc — отмена", symbol: "keyboard", tint: .systemYellow)
+    }
+
+    /// Вызывается из перехвата: нажата не-модификаторная клавиша в режиме записи сочетания.
+    func finishCapture(keyCode: Int64, flags: CGEventFlags) {
+        capturing = false
+        guard keyCode != cancelCode else { hud.show("Отменено", symbol: "xmark.circle.fill", hideAfter: 1); return }
+        guard let name = HotKey.keyCodes.first(where: { $0.value == CGKeyCode(keyCode) })?.key else {
+            hud.show("Эту клавишу назначить нельзя", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 3)
+            return
+        }
+        var parts: [String] = []
+        if flags.contains(.maskControl) { parts.append("ctrl") }
+        if flags.contains(.maskAlternate) { parts.append("alt") }
+        if flags.contains(.maskShift) { parts.append("shift") }
+        if flags.contains(.maskCommand) { parts.append("cmd") }
+        parts.append(name)
+        let spec = parts.joined(separator: "+")
+        guard HotKey.parse(spec) != nil else {
+            hud.show("Нужна F-клавиша или сочетание с модификатором", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            return
+        }
+        Config.save(["hotkey": spec])
+        reloadConfig()
     }
 
     @objc private func openConfig() {
@@ -838,14 +921,45 @@ final class App: NSObject, NSApplicationDelegate {
     private func hotkeyTitle() -> String { "\(hotkey.title) — диктовка, ещё раз — готово, Esc — отмена" }
 
     private func setupStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if statusItem == nil { statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
         let menu = NSMenu()
         hotkeyItem = NSMenuItem(title: hotkeyTitle(), action: nil, keyEquivalent: "")
         menu.addItem(hotkeyItem)
         menu.addItem(NSMenuItem(title: "Начать / остановить запись", action: #selector(menuToggle), keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Настройки (config.json)…", action: #selector(openConfig), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "Перечитать настройки", action: #selector(reloadConfig), keyEquivalent: "r"))
+        let settings = NSMenu()
+        let keys = NSMenu()
+        for spec in ["F5", "F6", "F13", "F19", "cmd+shift+space", "ctrl+alt+space", "ctrl+alt+d"] {
+            let item = NSMenuItem(title: HotKey.parse(spec)?.title ?? spec, action: #selector(pickHotkey(_:)), keyEquivalent: "")
+            item.representedObject = spec
+            item.state = spec.lowercased() == config.hotkey.lowercased() ? .on : .off
+            keys.addItem(item)
+        }
+        keys.addItem(.separator())
+        keys.addItem(NSMenuItem(title: "Записать новое сочетание…", action: #selector(captureHotkey), keyEquivalent: ""))
+        let keysItem = NSMenuItem(title: "Сочетание клавиш", action: nil, keyEquivalent: "")
+        keysItem.submenu = keys
+        settings.addItem(keysItem)
+        let styles = NSMenu()
+        for (name, title) in [("glass", "Liquid Glass"), ("metal", "Liquid Metal"), ("clear", "Прозрачное стекло"), ("dark", "Тёмная")] {
+            let item = NSMenuItem(title: title, action: #selector(pickStyle(_:)), keyEquivalent: "")
+            item.representedObject = name
+            item.state = name == config.style ? .on : .off
+            styles.addItem(item)
+        }
+        let stylesItem = NSMenuItem(title: "Стиль плашки", action: nil, keyEquivalent: "")
+        stylesItem.submenu = styles
+        settings.addItem(stylesItem)
+        let space = NSMenuItem(title: "Пробел после надиктованного", action: #selector(toggleTrailingSpace), keyEquivalent: "")
+        space.state = config.trailingSpace ? .on : .off
+        settings.addItem(space)
+        settings.addItem(.separator())
+        settings.addItem(NSMenuItem(title: "Открыть config.json…", action: #selector(openConfig), keyEquivalent: ","))
+        settings.addItem(NSMenuItem(title: "Перечитать настройки", action: #selector(reloadConfig), keyEquivalent: "r"))
+        for item in keys.items + styles.items + settings.items { item.target = self }
+        let settingsItem = NSMenuItem(title: "Настройки", action: nil, keyEquivalent: "")
+        settingsItem.submenu = settings
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Разрешение: Универсальный доступ…", action: #selector(openAccessibility), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Разрешение: Микрофон…", action: #selector(openMicrophone), keyEquivalent: ""))
@@ -1073,6 +1187,15 @@ func tapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let t = app.tap { CGEvent.tapEnable(tap: t, enable: true) }
         return Unmanaged.passUnretained(event)
+    }
+    if app.capturing {
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        if (54...63).contains(code) { return Unmanaged.passUnretained(event) }  // сами модификаторы
+        if type == .keyDown {
+            let flags = event.flags
+            DispatchQueue.main.async { app.finishCapture(keyCode: code, flags: flags) }
+        }
+        return nil
     }
     if app.hotkey.matches(event) {
         if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {

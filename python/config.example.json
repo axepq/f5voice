@@ -13,6 +13,7 @@
   "input_device": null,
   "tray": true,
   "hud": true,
+  "style": "glass",
   "cpu_threads": 0,
   "beam_size": 0
 }
