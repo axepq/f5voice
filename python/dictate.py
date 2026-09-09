@@ -751,18 +751,32 @@ class HUD(threading.Thread):
         return pts
 
     def _draw_metal_ring(self, c, width=3):
-        """Стальное кольцо (светлее сверху, темнее снизу) и один блик с хвостом, идущий по контуру."""
-        pts = self._pill_points(96, width / 2 + 1)
+        """Стальное кольцо (светлее сверху, темнее снизу), по которому скользит одна капля металла:
+        выпуклая бусина чуть шире кольца с мягкими краями и коротким мягким следом."""
+        pts = self._pill_points(96, 3.5)
         n = len(pts) - 1
         self.glint = (self.glint + self.TICK_MS / 1000.0 / self.GLINT_SECONDS) % 1.0
         for i in range(n):
             (x0, y0), (x1, y1) = pts[i], pts[i + 1]
             ny = (y0 + y1) / 2 / self.H                      # 0 — верх, 1 — низ
             base = 160 - 95 * ny
-            d = (self.glint - i / n) % 1.0                   # сколько контура позади головы блика
-            k = (1.0 - d / 0.2) ** 2 if d < 0.2 else 0.0
+            d = (self.glint - i / n) % 1.0                   # сколько контура позади бусины
+            k = (1.0 - d / 0.14) ** 2 * 0.55 if d < 0.14 else 0.0   # мягкий след
             v = int(base + (255 - base) * k)
             c.create_line(x0, y0, x1, y1, fill=f"#{v:02x}{v:02x}{min(255, v + 4):02x}", width=width, capstyle="round")
+        # Бусина: несколько штрихов по касательной, от широкого тусклого к узкому яркому
+        pos = self.glint * n
+        i0 = int(pos) % n
+        t = pos - int(pos)
+        (ax, ay), (bx, by) = pts[i0], pts[i0 + 1]
+        hx, hy = ax + (bx - ax) * t, ay + (by - ay) * t
+        L = math.hypot(bx - ax, by - ay) or 1.0
+        dx, dy = (bx - ax) / L, (by - ay) / L
+        base = int(160 - 95 * hy / self.H)
+        for w, half, k in ((7, 6.0, 0.35), (5.5, 5.0, 0.6), (4, 4.0, 0.85), (3, 3.0, 1.0)):
+            v = int(base + (255 - base) * k)
+            c.create_line(hx - dx * half, hy - dy * half, hx + dx * half, hy + dy * half,
+                          fill=f"#{v:02x}{v:02x}{min(255, v + 4):02x}", width=w, capstyle="round")
 
     def _draw(self):
         c = self.canvas

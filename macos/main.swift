@@ -492,17 +492,26 @@ final class Worker {
 
 enum HUDBars { case none, live, wave }
 
-/// Хромовое кольцо по краю плашки: неподвижная сталь (светлее сверху, темнее снизу) и один блик
-/// с гаснущим хвостом, который равномерно обходит контур по кругу (strokeStart/strokeEnd по
-/// удвоенному пути — так блик не рвётся на стыке).
+/// Хромовое кольцо по краю плашки: неподвижная сталь (светлее сверху, темнее снизу), по которой
+/// скользит одна капля металла — выпуклая бусина чуть шире кольца, с мягкими краями и коротким
+/// мягким следом. Бусина едет по контуру равномерно (CAKeyframeAnimation по пути, paced) и
+/// поворачивается по касательной; след — полупрозрачные штрихи по удвоенному пути, чтобы не
+/// рваться на стыке.
 final class MetalRing {
-    let layer = CALayer()
+    let layer = CALayer()                  // контейнер: кольцо с маской + бусина поверх без маски
+    private let ringLayer = CALayer()
     private let base = CAGradientLayer()
     private let mask = CAShapeLayer()
-    private var glints: [CAShapeLayer] = []
+    private let bead = CAGradientLayer()
+    private var trail: [CAShapeLayer] = []
+    private var lastWidth: CGFloat = 0
     let width: CGFloat = 3
+    let inset: CGFloat = 3.5               // центр кольца от края: 2 px стекла снаружи, место для бусины
     private let loopSeconds = 5.0
-    private let tail: [(length: CGFloat, alpha: CGFloat)] = [(0.20, 0.18), (0.14, 0.36), (0.09, 0.65), (0.045, 1.0)]
+    private let steps = 12                 // штрихов в следе
+    private let tailLength: CGFloat = 0.14 // доля контура позади бусины
+    private let frontLength: CGFloat = 0.02
+    private let beadSize = CGSize(width: 18, height: 7)
 
     init() {
         base.type = .axial
@@ -514,18 +523,19 @@ final class MetalRing {
         mask.fillColor = nil
         mask.strokeColor = NSColor.black.cgColor
         mask.lineWidth = width
-        layer.mask = mask
-        layer.addSublayer(base)
-        let longest = tail.map { $0.length }.max() ?? 0
-        for (length, alpha) in tail {
+        ringLayer.mask = mask
+        ringLayer.addSublayer(base)
+        // След: доли по удвоенному пути (оборот = 0.5), вершина общая.
+        let peak = tailLength / 2
+        for i in 0..<steps {
+            let f = CGFloat(i + 1) / CGFloat(steps)
             let g = CAShapeLayer()
             g.fillColor = nil
-            g.strokeColor = NSColor.white.withAlphaComponent(alpha).cgColor
+            g.strokeColor = NSColor.white.withAlphaComponent(0.13).cgColor
             g.lineWidth = width
             g.lineCap = .round
-            // Доли считаются по удвоенному пути: один оборот = 0.5. Голова у всех штрихов общая.
-            let head = longest / 2
-            let start = (longest - length) / 2
+            let start = peak - tailLength * f / 2
+            let head = peak + frontLength * f / 2
             g.strokeStart = start
             g.strokeEnd = head
             for (key, from) in [("strokeStart", start), ("strokeEnd", head)] {
@@ -537,20 +547,31 @@ final class MetalRing {
                 a.timingFunction = CAMediaTimingFunction(name: .linear)
                 g.add(a, forKey: key)
             }
-            layer.addSublayer(g)
-            glints.append(g)
+            ringLayer.addSublayer(g)
+            trail.append(g)
         }
+        // Бусина: мягкий овал, белый центр сходит на нет к краю.
+        bead.type = .radial
+        bead.startPoint = CGPoint(x: 0.5, y: 0.5)
+        bead.endPoint = CGPoint(x: 1, y: 1)
+        bead.colors = [NSColor.white.cgColor, NSColor(calibratedWhite: 1, alpha: 0.95).cgColor,
+                       NSColor(calibratedWhite: 0.92, alpha: 0.55).cgColor, NSColor(calibratedWhite: 0.9, alpha: 0).cgColor]
+        bead.locations = [0, 0.3, 0.62, 1]
+        bead.bounds = CGRect(origin: .zero, size: beadSize)
+        layer.addSublayer(ringLayer)
+        layer.addSublayer(bead)
     }
 
     func layout(in bounds: CGRect, cornerRadius: CGFloat, animated: Bool) {
-        let inset = bounds.insetBy(dx: width / 2, dy: width / 2)
-        let pill = CGPath(roundedRect: inset, cornerWidth: cornerRadius - width / 2, cornerHeight: cornerRadius - width / 2, transform: nil)
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        let pill = CGPath(roundedRect: rect, cornerWidth: cornerRadius - inset, cornerHeight: cornerRadius - inset, transform: nil)
         let doubled = CGMutablePath()
         doubled.addPath(pill)
         doubled.addPath(pill)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer.frame = bounds
+        ringLayer.frame = bounds
         mask.frame = bounds
         base.frame = bounds
         if animated, let from = mask.presentation()?.path ?? mask.path {
@@ -562,13 +583,29 @@ final class MetalRing {
             mask.add(a, forKey: "path")
         }
         mask.path = pill
-        for g in glints {
+        for g in trail {
             g.frame = bounds
             g.path = doubled
+        }
+        if abs(bounds.width - lastWidth) > 0.5 {
+            lastWidth = bounds.width
+            // Бусина идёт по тому же пути, что и вершина следа: та стартует на tailLength впереди
+            // начала пути, поэтому у бусины такое же смещение по времени.
+            let move = CAKeyframeAnimation(keyPath: "position")
+            move.path = pill
+            move.calculationMode = .paced
+            move.rotationMode = .rotateAuto
+            move.duration = loopSeconds
+            move.repeatCount = .infinity
+            move.timingFunction = CAMediaTimingFunction(name: .linear)
+            move.timeOffset = Double(tailLength) * loopSeconds
+            bead.removeAnimation(forKey: "move")
+            bead.add(move, forKey: "move")
         }
         CATransaction.commit()
     }
 }
+
 let hudResizeDuration = 0.22
 
 enum HUDAnim { case none, breathe, pulse, variableColor }
