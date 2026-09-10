@@ -77,6 +77,6 @@ def send(cmd, home, timeout=2.0):
         info = json.loads(path.read_text(encoding="utf-8"))
         with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=timeout) as s:
             s.sendall(f"{info.get('token', '')} {cmd}\n".encode("utf-8"))
-            return s.makefile("r", encoding="utf-8").readline().strip() not in ("", "denied")
+            return s.makefile("r", encoding="utf-8").readline().strip() == "ok"  # чужой сервер на порту — не «работает»
     except (OSError, ValueError, KeyError, TypeError):
         return False

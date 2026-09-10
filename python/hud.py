@@ -332,7 +332,7 @@ if IS_WINDOWS:
             ex = 0x00080000 | 0x8 | 0x80 | 0x20 | 0x08000000  # LAYERED | TOPMOST | TOOLWINDOW | TRANSPARENT | NOACTIVATE
             self.hwnd = u.CreateWindowExW(ex, self.CLASS, "F5Voice", 0x80000000, 0, 0, 1, 1, None, None, hinst, None)
             if not self.hwnd:
-                raise OSError(f"CreateWindowExW: ошибка {ctypes.get_last_error()}")
+                raise OSError(f"CreateWindowExW: ошибка {ctypes.GetLastError()}")
             self.shown = False
 
         def pump(self):

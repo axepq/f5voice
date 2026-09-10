@@ -192,9 +192,10 @@ def model_files(model):
     from download_model import resolve_repo
 
     repo = resolve_repo(model)
-    root = Path(os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface") / "hub")
-    if os.environ.get("HF_HUB_CACHE") is None and os.environ.get("HF_HOME"):
-        root = Path(os.environ["HF_HOME"]) / "hub"
+    if os.environ.get("HF_HUB_CACHE"):
+        root = Path(os.environ["HF_HUB_CACHE"])
+    else:
+        root = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
     snaps = root / ("models--" + repo.replace("/", "--")) / "snapshots"
     if not snaps.is_dir():
         return repo, None
@@ -267,7 +268,7 @@ def resolve_backend(cfg):
         ok, detail = _probe(model, "cuda", want_ct)
         if ok:
             log("CUDA работает — распознаю на видеокарте")
-            return remember("cuda", want_ct)
+            return remember("cuda", want_ct if want_ct != "auto" else "float16")  # «auto» не запоминается — проверка шла бы каждый старт
         log(f"CUDA не заработала ({detail}) — работаю на процессоре. Для видеокарты NVIDIA см. README: "
             "нужны cuBLAS и cuDNN для CUDA 12.")
         cfg["device_note"] = "auto → cpu: CUDA не прошла проверку. Поставь \"auto\", чтобы проверить снова."
@@ -416,16 +417,20 @@ class WinHotkey(threading.Thread):
         self.error = ""
         self.gen = 0
 
-    def _watch_release(self, gen):
+    def _watch_release(self, gen, press_done):
         """WM_HOTKEY приходит только на нажатие; отпускание основной клавиши ловим опросом.
-        Если за это время пришло новое нажатие (gen сменился) — отпускание уже учтено, молчим."""
+        Запускается до on_press, чтобы момент отпускания был настоящим (старт записи может занять
+        полсекунды, и короткое нажатие иначе выглядело бы долгим удержанием); сам on_release —
+        только после on_press. Если за это время пришло новое нажатие (gen сменился) — молчим."""
         user32 = ctypes.windll.user32
         while user32.GetAsyncKeyState(self.vk) & 0x8000:
             time.sleep(0.02)
             if self.gen != gen:
                 return
+        released_at = time.monotonic()
+        press_done.wait(5)
         if self.gen == gen:
-            self.on_release()
+            self.on_release(released_at)
 
     def run(self):
         import ctypes.wintypes
@@ -441,24 +446,29 @@ class WinHotkey(threading.Thread):
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == 0x0312:  # WM_HOTKEY
                 self.gen += 1
+                press_done = threading.Event()
+                if self.on_release:  # WM_HOTKEY приходит только на нажатие — отпускание ловим опросом
+                    threading.Thread(target=self._watch_release, args=(self.gen, press_done), daemon=True).start()
                 try:
                     self.on_press()
-                    if self.on_release:  # WM_HOTKEY приходит только на нажатие — отпускание ловим опросом
-                        threading.Thread(target=self._watch_release, args=(self.gen,), daemon=True).start()
                 except Exception as e:  # noqa: BLE001
                     log(f"! обработчик клавиши: {e}")
+                finally:
+                    press_done.set()
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
 
 def beep(kind="start"):
     if IS_WINDOWS:
-        try:
-            import winsound
-            winsound.Beep({"start": 880, "stop": 660}.get(kind, 330), 120)
-            return
-        except Exception:  # noqa: BLE001
-            pass
+        def play():
+            try:
+                import winsound
+                winsound.Beep({"start": 880, "stop": 660}.get(kind, 330), 120)
+            except Exception:  # noqa: BLE001
+                pass
+        threading.Thread(target=play, daemon=True).start()  # Beep блокирует на 120 мс — не в потоке хука
+        return
     print("\a", end="", flush=True)
 
 
@@ -842,7 +852,13 @@ class HUD(threading.Thread):
             def name(k):
                 if isinstance(k, keyboard.Key):
                     return k.name.replace("_l", "").replace("_r", "").replace("cmd", "win")
-                return (getattr(k, "char", None) or "").lower() or None
+                vk = getattr(k, "vk", None)
+                if vk is not None and 0x30 <= vk <= 0x5A:  # под Ctrl char — управляющий символ, буква только в vk
+                    return chr(vk).lower()
+                ch = getattr(k, "char", None) or ""
+                if len(ch) == 1 and 1 <= ord(ch) <= 26:
+                    ch = chr(ord(ch) + 96)
+                return ch.lower() or None
 
             def on_press(k):
                 n = name(k)
@@ -1122,10 +1138,10 @@ class App:
         if self.gate.held and self.state == "recording":
             self._show("recording", "Говорите…   отпустите — готово · Esc — отмена")
 
-    def on_hotkey_release(self):
+    def on_hotkey_release(self, released_at=None):
         if self.hold_hint:
             self.hold_hint.cancel()
-        if self.gate.release(self.state == "recording") == "stop":
+        if self.gate.release(self.state == "recording", released_at) == "stop":
             self.toggle()
 
     def cancel(self):
@@ -1144,6 +1160,8 @@ class App:
             self.recorder.start()
         except Exception as e:  # noqa: BLE001
             log(f"! запись не началась: {e}")
+            beep("error")
+            self._show("error", "Микрофон не отвечает — смотри лог", 3)
             return
         self._set_state("recording")
         beep("start")
@@ -1231,19 +1249,20 @@ class App:
                 else:
                     log(f"RegisterHotKey не удался ({wh.error}) — пробую pynput")
             try:  # Esc — через слушатель pynput, RegisterHotKey отобрал бы Esc у всех программ
-                self.esc_listener = keyboard.Listener(
-                    on_press=lambda k: self.cancel() if k == keyboard.Key.esc else None)
+                self.esc_listener = keyboard.Listener(  # колбэки pynput на Windows идут из хука: работа — в потоке
+                    on_press=lambda k: spawn(self.cancel) if k == keyboard.Key.esc else None)
                 self.esc_listener.daemon = True
                 self.esc_listener.start()
             except Exception as e:  # noqa: BLE001
                 log(f"Esc для отмены недоступен ({e})")
         if not registered:
             try:
-                keys = {hotkey: self.on_hotkey_press}
+                press = lambda: spawn(self.on_hotkey_press)  # noqa: E731 — из хука pynput только запуск потока
+                keys = {hotkey: press}
                 if "<alt>" in hotkey:  # правый Alt на Windows/Linux приходит как alt_gr
-                    keys[hotkey.replace("<alt>", "<alt_gr>")] = self.on_hotkey_press
+                    keys[hotkey.replace("<alt>", "<alt_gr>")] = press
                 if not IS_WINDOWS:
-                    keys["<esc>"] = self.cancel
+                    keys["<esc>"] = lambda: spawn(self.cancel)
                 self.hotkeys = keyboard.GlobalHotKeys(keys)
                 self.hotkeys.start()
                 registered = "pynput"
@@ -1252,12 +1271,15 @@ class App:
                 if target is not None:
                     def on_release(k, target=target, name=name):
                         if k == target or key_is(k, name):
-                            self.on_hotkey_release()
+                            spawn(self.on_hotkey_release, time.monotonic())
                     self.release_listener = keyboard.Listener(on_release=on_release)
                     self.release_listener.daemon = True
                     self.release_listener.start()
             except Exception as e:  # noqa: BLE001
                 log(f"[READY] глобальная клавиша не заработала ({e}). Переключай командой: python python/dictate.py --toggle")
+                self.ready = True  # иначе --toggle и окно вечно отвечают «Ещё загружаю модель…»
+                if self.show_window:
+                    self.open_settings()
                 return
         log(f"[READY] готов: {hotkey} — диктовка ({registered}), Esc — отмена, Ctrl+C — выход.")
         if os.environ.get("XDG_SESSION_TYPE") == "wayland":
@@ -1292,6 +1314,8 @@ class App:
                     time.sleep(1)
         except KeyboardInterrupt:
             pass
+        except Exception as e:  # noqa: BLE001 — иначе quit() → os._exit скроет причину
+            log(f"[FATAL] {type(e).__name__}: {e}")
         finally:
             self.quit()
 
@@ -1427,5 +1451,22 @@ def main():
     App(cfg, show_window=what).run()
 
 
+def spawn(fn, *args):
+    """Выполнить в отдельном потоке: колбэки pynput на Windows вызываются из низкоуровневого хука,
+    и всё долгое там замораживает ввод, а при превышении таймаута Windows снимает хук."""
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 — под pythonw traceback никто не увидит
+        log(f"[FATAL] {type(e).__name__}: {e}")
+        if IS_WINDOWS:
+            try:
+                ctypes.windll.user32.MessageBoxW(None, f"{type(e).__name__}: {e}\n\nПодробности в {LOG_PATH}", "F5Voice", 0x10)
+            except Exception:  # noqa: BLE001
+                pass
+        raise
