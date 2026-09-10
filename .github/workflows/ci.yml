@@ -28,6 +28,7 @@ jobs:
       - run: python python/test_dictate.py
       - run: python python/test_history.py
       - run: python python/test_hud.py
+      - run: python python/test_rewrite.py
 
   macos:
     # Приложение для macOS собирается системным swiftc, как у пользователя.
