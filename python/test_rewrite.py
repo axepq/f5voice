@@ -74,5 +74,68 @@ class SplitCommand(unittest.TestCase):
         self.assertEqual(rewrite.split_command("Текст. Сократи.", cmds)[1]["key"], "shorter")
 
 
+class BuildMessages(unittest.TestCase):
+    def test_system_has_rules_and_task(self):
+        _, cmd = rewrite.split_command("Текст. Официально.")
+        msgs = rewrite.build_messages("Текст.", cmd)
+        self.assertEqual([m["role"] for m in msgs], ["system", "user"])
+        self.assertIn("Верни только", msgs[0]["content"])
+        self.assertIn("длинного тире", msgs[0]["content"])
+        self.assertIn(cmd["instruction"], msgs[0]["content"])
+        self.assertEqual(msgs[1]["content"], "Текст.")
+
+    def test_free_instruction_goes_as_task(self):
+        _, cmd = rewrite.split_command("Текст. Команда: сделай списком.")
+        msgs = rewrite.build_messages("Текст.", cmd)
+        self.assertIn("сделай списком", msgs[0]["content"])
+
+
+class Humanize(unittest.TestCase):
+    """Модель иногда не слушается инструкции — следы ИИ снимаем жёстко."""
+
+    def test_dashes_become_hyphen(self):
+        self.assertEqual(rewrite.humanize("Срок — пятница, 5–10 штук"), "Срок - пятница, 5 - 10 штук")
+
+    def test_markdown_removed(self):
+        self.assertEqual(rewrite.humanize("## Заголовок\n**жирно** и *курсив*\n- пункт\n* ещё"),
+                         "Заголовок\nжирно и курсив\nпункт\nещё")
+
+    def test_exclamations_collapsed(self):
+        self.assertEqual(rewrite.humanize("Ура!!! Готово!!"), "Ура! Готово!")
+
+    def test_think_block_and_wrapping_quotes_removed(self):
+        self.assertEqual(rewrite.humanize("<think>\nдумаю\n</think>\n«Готово.»"), "Готово.")
+        self.assertEqual(rewrite.humanize('"Готово."'), "Готово.")
+
+    def test_inner_quotes_kept(self):
+        self.assertEqual(rewrite.humanize("Проект «Альфа» готов."), "Проект «Альфа» готов.")
+
+    def test_whitespace_normalized(self):
+        self.assertEqual(rewrite.humanize("  а   б \n\n\n\n в  "), "а б\n\nв")
+
+
+class Accept(unittest.TestCase):
+    def setUp(self):
+        self.official = rewrite.split_command("Текст. Официально.")[1]
+        self.shorter = rewrite.split_command("Текст. Короче.")[1]
+        self.free = rewrite.split_command("Текст. Команда: убери всё лишнее.")[1]
+        self.original = "Привет, слушай, я по поводу вчерашнего договора, там цифра не та, поправьте."
+
+    def test_empty_rejected(self):
+        self.assertFalse(rewrite.accept(self.original, "", self.official))
+        self.assertFalse(rewrite.accept(self.original, "   ", self.shorter))
+
+    def test_too_short_rejected_for_rewrite(self):
+        self.assertFalse(rewrite.accept(self.original, "Поправьте.", self.official))
+
+    def test_short_ok_for_shorter_and_free(self):
+        self.assertTrue(rewrite.accept(self.original, "Поправьте цифру в договоре.", self.shorter))
+        self.assertTrue(rewrite.accept(self.original, "Поправьте.", self.free))
+
+    def test_normal_accepted(self):
+        self.assertTrue(rewrite.accept(self.original, "Добрый день. Прошу исправить сумму в договоре.",
+                                       self.official))
+
+
 if __name__ == "__main__":
     unittest.main()
