@@ -206,9 +206,12 @@ def main():
             body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if rw["model"] else (text, None)
             if cmd:
                 out({"status": "rewrite", "command": cmd["title"]})
+                log(f"переписываю ({cmd['key']}: {cmd['title']}) ← {body[:300]}")
                 t2 = time.time()
                 try:
-                    result = rewrite.humanize(llm.rewrite(rw["model"], rewrite.build_messages(body, cmd), rw["idle_sec"]))
+                    raw = llm.rewrite(rw["model"], rewrite.build_messages(body, cmd), rw["idle_sec"])
+                    result = rewrite.humanize(raw)
+                    log(f"модель ответила за {time.time() - t2:.1f} с → {result[:300]}")
                     if not rewrite.accept(body, result, cmd):
                         raise ValueError("ответ модели пустой или слишком короткий")
                     text = result

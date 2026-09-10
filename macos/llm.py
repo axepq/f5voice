@@ -7,6 +7,8 @@ import glob
 import os
 import time
 
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")  # «Fetching 9 files» в логе ни к чему
+
 
 class Rewriter:
     def __init__(self, log=print):
@@ -34,7 +36,6 @@ class Rewriter:
         t0 = time.time()
         if _cached(name):
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")  # «Fetching 9 files» в логе ни к чему
         self.model, self.tok = load(name)
         self.model_name = name
         self.log(f"модель переписывания {name} загружена за {time.time() - t0:.1f} с, "

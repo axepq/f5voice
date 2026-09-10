@@ -33,6 +33,13 @@ class SplitCommand(unittest.TestCase):
                 self.assertEqual(body, "Текст письма.", trig)
                 self.assertEqual(cmd["key"], key, trig)
 
+    def test_verb_wrappers(self):
+        for tail in ("Сделай в официальном стиле.", "Напиши официально", "а теперь сделай это покороче.",
+                     "Переведи на английский.", "давай технический стиль"):
+            body, cmd = rewrite.split_command("Скиньте договор до пятницы. " + tail)
+            self.assertEqual(body, "Скиньте договор до пятницы.", tail)
+            self.assertIsNotNone(cmd, tail)
+
     def test_command_alone_is_plain_text(self):
         text = "Официальный стиль."
         self.assertEqual(rewrite.split_command(text), (text, None))
