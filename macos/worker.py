@@ -11,7 +11,7 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
   F5_LANGS          языки через запятую, первый — основной (ru,en)
   F5_ALT_MIN_PROB   уверенность, с которой берём не основной язык (0.95)
   F5_PROMPT         подсказка модели (стиль, названия латиницей)
-  F5_IDLE_SEC       простой до выгрузки модели (900)
+  F5_IDLE_SEC       простой до выгрузки модели (900); 0 — не выгружать
 
 Протокол:
   <- {"ready": true, "load_sec": 2.5}
@@ -57,6 +57,8 @@ LANGS = tuple(x.strip() for x in (os.environ.get("F5_LANGS") or "ru,en").split("
 ALT_MIN_PROB = float(os.environ.get("F5_ALT_MIN_PROB") or "0.95")
 PROMPT = os.environ.get("F5_PROMPT") or DEFAULT_PROMPT
 IDLE_SEC = float(os.environ.get("F5_IDLE_SEC") or "900")
+if IDLE_SEC <= 0:
+    IDLE_SEC = float("inf")  # 0 в настройках — «не выгружать», а не «выгрузить сразу»
 RATE = 16000
 
 
@@ -175,7 +177,7 @@ def main():
         timeout = IDLE_SEC - (time.time() - last_use)
         if llm.loaded:
             timeout = min(timeout, llm.idle_left())
-        readable, _, _ = select.select([sys.stdin], [], [], max(0.0, timeout))
+        readable, _, _ = select.select([sys.stdin], [], [], None if timeout == float("inf") else max(0.0, timeout))
         if not readable:
             if llm.loaded and llm.idle_left() <= 0:
                 llm.unload()

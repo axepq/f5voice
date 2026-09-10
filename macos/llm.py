@@ -34,9 +34,15 @@ class Rewriter:
 
         self.unload()
         t0 = time.time()
-        if _cached(name):
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        self.model, self.tok = load(name)
+        # Воркер выставляет HF_HUB_OFFLINE=1 ради Whisper, а huggingface_hub читает его один раз при импорте:
+        # новую модель переписывания иначе никогда не скачать. Переключаем флаг только на время загрузки.
+        from huggingface_hub import constants as hf
+        was = hf.HF_HUB_OFFLINE
+        hf.HF_HUB_OFFLINE = _cached(name)
+        try:
+            self.model, self.tok = load(name)
+        finally:
+            hf.HF_HUB_OFFLINE = was
         self.model_name = name
         self.log(f"модель переписывания {name} загружена за {time.time() - t0:.1f} с, "
                  f"память {mx.get_active_memory() / 1e9:.1f} ГБ")
@@ -54,7 +60,7 @@ class Rewriter:
         self.model_name = None
 
     def rewrite(self, model, messages, idle_sec, max_tokens=None):
-        from mlx_lm import generate
+        from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_logits_processors
 
         self.idle_sec = float(idle_sec)
@@ -62,12 +68,17 @@ class Rewriter:
             self._load(model)
         self.last_use = time.time()
         prompt = self.tok.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)
-        if max_tokens is None:  # ответ не длиннее удвоенного исходника; потолок — чтобы зацикливание не длилось минуты
-            max_tokens = min(2 * len(self.tok.encode(messages[-1]["content"])) + 64, 700)
-        text = generate(self.model, self.tok, prompt=prompt, max_tokens=max_tokens, verbose=False,
-                        logits_processors=make_logits_processors(repetition_penalty=1.1))
+        if max_tokens is None:  # ответ не длиннее утроенного исходника; потолок — чтобы зацикливание не длилось минуты
+            max_tokens = min(3 * len(self.tok.encode(messages[-1]["content"])) + 128, 2500)
+        chunks, finish = [], None
+        for r in stream_generate(self.model, self.tok, prompt=prompt, max_tokens=max_tokens,
+                                 logits_processors=make_logits_processors(repetition_penalty=1.1)):
+            chunks.append(r.text)
+            finish = r.finish_reason
         self.last_use = time.time()
-        return text
+        if finish == "length":  # упёрлись в потолок: ответ оборван на полуслове или модель зациклилась
+            raise ValueError(f"ответ модели оборван на {max_tokens} токенах")
+        return "".join(chunks)
 
 
 def _cached(name):

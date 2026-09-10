@@ -30,9 +30,11 @@ let logPath = homeDir + "/f5voice.log"
 let launchdLabel = "com.alex.f5voice"
 let cancelCode: Int64 = 53                 // Esc
 let spareKeyCode: CGKeyCode = 64           // F17: сюда hidutil переводит выбранную F-клавишу
+let typeQueue = DispatchQueue(label: "f5voice.type", qos: .userInteractive)
 let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клавиатуры
 let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
 let rewriteTimeoutSeconds: Double = 120     // переписывание моделью: загрузка + генерация длинного текста
+let loadTimeoutSeconds: Double = 600        // воркер грузит (или качает) модель Whisper до отправки запроса
 let isService = CommandLine.arguments.contains("--service")  // запущены службой launchd, а не вручную
 let openNote = Notification.Name("com.alex.f5voice.open")       // «покажи окно» от повторного запуска
 let toggleNote = Notification.Name("com.alex.f5voice.toggle")   // F5Voice --toggle: начать/закончить запись
@@ -361,6 +363,8 @@ final class Worker {
     var config: Config
     var onReady: (() -> Void)?
     var onStatus: ((String, String) -> Void)?   // (status, command) — промежуточная строка воркера
+    var onSent: (() -> Void)?                     // запрос реально ушёл воркеру: с этого момента считаем таймаут
+    private(set) var lastExitCode: Int32 = 0      // как завершился прошлый воркер: 0 — штатно (простой)
     private var process: Process?
     private var stdinPipe: Pipe?
     private var buffer = Data()
@@ -399,6 +403,7 @@ final class Worker {
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 guard let self = self, self.process === proc else { return }
                 log("воркер завершился, код \(proc.terminationStatus)")
+                self.lastExitCode = proc.terminationStatus
                 self.process = nil
                 self.stdinPipe = nil
                 self.isReady = false
@@ -411,6 +416,11 @@ final class Worker {
         }
         do { try p.run() } catch {
             log("не удалось запустить воркер: \(error)")
+            lastExitCode = -1
+            if let pend = pending {  // иначе приложение навсегда останется в «Распознаю…»
+                pending = nil
+                pend.completion(Reply(error: "воркер не запускается — смотри лог"))
+            }
             return
         }
         process = p
@@ -420,16 +430,16 @@ final class Worker {
 
     /// Останавливает воркер. Если он что-то распознавал, запрос завершается ошибкой `reason`.
     func stop(reason: String = "воркер остановлен") {
+        if let pend = pending {  // до проверки процесса: запрос мог ждать воркер, который так и не стартовал
+            pending = nil
+            pend.completion(Reply(error: reason))
+        }
         guard let p = process else { return }
         process = nil
         stdinPipe = nil
         isReady = false
         buffer.removeAll()
         p.terminate()
-        if let pend = pending {
-            pending = nil
-            pend.completion(Reply(error: reason))
-        }
     }
 
     func transcribe(_ path: String, completion: @escaping (Reply) -> Void) {
@@ -447,6 +457,7 @@ final class Worker {
         pending = pend
         do {
             try pipe.fileHandleForWriting.write(contentsOf: (pend.path + "\n").data(using: .utf8)!)
+            onSent?()
         } catch {
             log("не смог передать файл воркеру: \(error.localizedDescription)")
             pending = nil
@@ -681,6 +692,8 @@ final class HUD {
     private var generation = 0        // растёт на каждом показе: устаревшее скрытие не сработает
     private var hiding = false
     let style: String
+
+    deinit { panel.close() }          // смена стиля создаёт новый HUD: старая панель не должна остаться на экране
 
     init(style: String) {
         self.style = style
@@ -944,20 +957,16 @@ final class App: NSObject, NSApplicationDelegate {
             guard let self = self, self.state == .transcribing else { return }
             self.showTranscribing()
         }
+        worker.onSent = { [weak self] in
+            guard let self = self, self.state == .transcribing else { return }
+            self.armTimeout(transcribeTimeoutSeconds, what: "воркер не ответил")
+        }
         worker.onStatus = { [weak self] status, command in
             guard let self = self, self.state == .transcribing, status == "rewrite" else { return }
             self.hud.show("Переписываю: \(command)…   Esc — отменить", symbol: "wand.and.stars",
                           tint: NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1),
                           bars: .wave, animate: .pulse)
-            self.transcribeTimeout?.cancel()
-            let timeout = DispatchWorkItem { [weak self] in
-                guard let self = self, self.state == .transcribing else { return }
-                log("модель переписывания не ответила за \(Int(rewriteTimeoutSeconds)) с — перезапускаю воркер")
-                self.worker.stop(reason: "переписывание зависло и было прервано")
-                self.worker.start()
-            }
-            self.transcribeTimeout = timeout
-            DispatchQueue.main.asyncAfter(deadline: .now() + rewriteTimeoutSeconds, execute: timeout)
+            self.armTimeout(rewriteTimeoutSeconds, what: "модель переписывания не ответила")
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -995,7 +1004,9 @@ final class App: NSObject, NSApplicationDelegate {
         case .recording: return "Запись…   \(hotkey.title) — готово, Esc — отмена"
         case .transcribing: return "Распознаю…"
         case .idle:
-            return (worker.isReady ? "Готов" : "Загружаю модель…") + "   \(hotkey.title) — диктовка, ещё раз — готово, Esc — отмена"
+            let s = worker.isReady ? "Готов" : (!worker.isRunning && worker.lastExitCode != 0
+                                                    ? "Воркер упал (код \(worker.lastExitCode)) — смотри лог" : "Загружаю модель…")
+            return s + "   \(hotkey.title) — диктовка, ещё раз — готово, Esc — отмена"
                 + "\nМодель \(config.model)"
         }
     }
@@ -1066,7 +1077,9 @@ final class App: NSObject, NSApplicationDelegate {
     func finishCapture(keyCode: Int64, flags: CGEventFlags) {
         capturing = false
         guard keyCode != cancelCode else { hud.show("Отменено", symbol: "xmark.circle.fill", hideAfter: 1); return }
-        guard let name = HotKey.keyCodes.first(where: { $0.value == CGKeyCode(keyCode) })?.key else {
+        var found = HotKey.keyCodes.first(where: { $0.value == CGKeyCode(keyCode) })?.key
+        if CGKeyCode(keyCode) == spareKeyCode, let f = hotkey.fKey { found = "f\(f)" }  // это наша же F-клавиша после перевода в F17
+        guard let name = found else {
             hud.show("Эту клавишу назначить нельзя", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 3)
             return
         }
@@ -1365,17 +1378,25 @@ final class App: NSObject, NSApplicationDelegate {
         play("Pop")
         showTranscribing()
         log(String(format: "записано %.1f с, распознаю", seconds))
+        // Пока воркер грузит (или качает) модель, запрос лежит в очереди: на это даём долгий таймаут.
+        // Короткий таймаут распознавания взводится в onSent, когда путь реально ушёл воркеру.
+        armTimeout(loadTimeoutSeconds, what: "воркер не загрузил модель")
+        worker.transcribe(lastWav) { [weak self] reply in
+            self?.handle(reply)
+        }
+    }
+
+    /// Перезапустить воркер, если он не ответил за `seconds`; предыдущий таймер отменяется.
+    func armTimeout(_ seconds: Double, what: String) {
+        transcribeTimeout?.cancel()
         let timeout = DispatchWorkItem { [weak self] in
             guard let self = self, self.state == .transcribing else { return }
-            log("воркер не ответил за \(Int(transcribeTimeoutSeconds)) с — перезапускаю его")
+            log("\(what) за \(Int(seconds)) с — перезапускаю его")
             self.worker.stop(reason: "распознавание зависло и было прервано")
             self.worker.start()
         }
         transcribeTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + transcribeTimeoutSeconds, execute: timeout)
-        worker.transcribe(lastWav) { [weak self] reply in
-            self?.handle(reply)
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: timeout)
     }
 
     private func handle(_ reply: Worker.Reply) {
@@ -1415,7 +1436,7 @@ final class App: NSObject, NSApplicationDelegate {
         let endsWithNewline = reply.text.hasSuffix("\n")
         let text = (config.trailingSpace && !endsWithNewline) ? reply.text + " " : reply.text
         let cfg = config
-        DispatchQueue.global(qos: .userInteractive).async { typeText(text, config: cfg) }
+        typeQueue.async { typeText(text, config: cfg) }  // одна очередь: две диктовки подряд не перемешиваются
     }
 }
 

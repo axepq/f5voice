@@ -104,7 +104,7 @@ fi
 
 step "Python-окружение в $HOME_DIR/venv"
 [[ -x "$HOME_DIR/venv/bin/python" ]] || python3 -m venv "$HOME_DIR/venv"
-"$HOME_DIR/venv/bin/pip" install --upgrade pip | tail -1
+"$HOME_DIR/venv/bin/pip" install --upgrade pip 2>/dev/null | tail -1 || echo "  pip не обновлён (нет сети?) — продолжаю"
 step "Зависимости (mlx-whisper и остальное, около 500 МБ)"
 "$HOME_DIR/venv/bin/pip" install -r "$SRC/macos/requirements.txt" || fail "pip не смог поставить зависимости"
 

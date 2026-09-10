@@ -15,7 +15,8 @@ cp "$DIR/F5Voice.icns" "$STAGE/Contents/Resources/F5Voice.icns"
 swiftc -O -target arm64-apple-macosx14.0 -framework Cocoa -framework AVFoundation \
     "$DIR/main.swift" "$DIR/settings.swift" -o "$STAGE/Contents/MacOS/F5Voice"
 codesign --force --sign - -r '=designated => identifier "com.alex.f5voice"' "$STAGE" 2>&1 \
-    | grep -v 'replacing existing signature' || true
+    | { grep -v 'replacing existing signature' || true; }
+(( pipestatus[1] == 0 )) || { echo "codesign не удался" >&2; exit 1; }
 mkdir -p "${APP:h}"
 rm -rf "$APP"
 mv "$STAGE" "$APP"
