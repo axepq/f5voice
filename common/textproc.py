@@ -22,9 +22,9 @@ STRIP_ANYWHERE = [
     r"субтитры\s+\S+\s+dimatorzok",
     r"dimatorzok",
     r"редактор субтитров[^.]*",
-    r"корректор\s+[а-яё]\.\s*[а-яё]+",
+    r"корректор\s+[а-яё]\.\s*[а-яё]+\s*$",   # титр в конце; «звонок в корректор А. Иванов» в речи оставляем
     r"продолжение следует\.*",
-    r"\[[^\]]*\]",           # [музыка], [смех], [music]
+    r"\[[^\]\d]{1,30}\]",    # [музыка], [смех], [music]; arr[0] и [1] — не титры
     r"\([^)]*музык[^)]*\)",  # (музыка)
     r"[♪♫]+",
 ]
@@ -64,8 +64,8 @@ def looks_like_prompt_echo(text, prompt):
     p = _norm(prompt or "")
     if not p:
         return False
-    if len(t.split()) >= 4 and t in p:
-        return True
+    if len(t.split()) >= 4 and t in p and len(t) >= 0.5 * len(p):
+        return True  # кусок подсказки короче половины — это может быть и живая речь («GitHub, Vercel, …»)
     return difflib.SequenceMatcher(None, t, p).ratio() > 0.75
 
 
@@ -107,12 +107,12 @@ COMMANDS = [
     (r"точка", ".", "punct"),
     (r"обратн(?:ый|ая)\s+(?:сл[эе]ш|косая\s+черта)|б[эе]к\s*сл[эе]ш", "\\", "both"),
     (r"(?:прямой\s+)?сл[эе]ш|косая\s+черта|дробь", "/", "both"),
-    (r"знак\s+(?:равно|равенства)|равно", "=", "none"),
+    (r"знак\s+(?:равно|равенства)|(?<!вс[её]\s)равно", "=", "none"),   # «всё равно» — не знак
     (r"плюс", "+", "none"),
     (r"минус", "-", "none"),
     (r"зв[её]здочка|астериск", "*", "none"),
     (r"реш[её]тка|х[эе]штег|диез", "#", "right"),
-    (r"собака|собачка", "@", "both"),
+    (r"(?<=[a-z0-9]\s)собак[аи](?=\s[a-z0-9])|собачка", "@", "both"),   # только между латиницей: alex собака gmail
     (r"амперсанд", "&", "none"),
     (r"знак\s+процента", "%", "left"),
     (r"знак\s+доллара", "$", "right"),
@@ -161,6 +161,7 @@ def apply_commands(text):
     result = ""
     pending_strip = None   # что убрать в начале следующего куска текста
     cap_next = False
+    lower_next = False     # после «точка» внутри домена whisper любит заглавную: gmail точка Com
     for i, part in enumerate(parts):
         m = re.fullmatch(r"\x00([a-z]+)\x00([^\x00]*)\x00", part)
         if not m:
@@ -170,12 +171,15 @@ def apply_commands(text):
             if cap_next and part.strip():
                 part = _cap(part)
                 cap_next = False
+            if lower_next and part.strip():
+                part = re.sub(r"^\s*\S", lambda m: m.group(0).lower(), part)
+                lower_next = False
             result += part
             continue
         mode, sym = m.groups()
         nxt = peek(i)
         next_is_punct = nxt != "" and nxt in ".,;:!?…"
-        next_is_latin_or_digit = bool(re.match(r"[a-z0-9]", nxt))
+        next_is_latin_or_digit = bool(re.match(r"[a-z0-9]", nxt, re.IGNORECASE))
         if mode == "newline":
             result = result.rstrip(" ") + sym
             pending_strip, cap_next = " .,;:!?", True
@@ -183,7 +187,7 @@ def apply_commands(text):
             result = result.rstrip(" .,;:!?") + sym
             pending_strip = " .,;:!?"
             if sym == "." and next_is_latin_or_digit:
-                pass  # button.tsx, v1.2, gmail.com — без пробела и заглавной
+                lower_next = True  # button.tsx, v1.2, gmail.com — без пробела и заглавной
             else:
                 result += " "
                 cap_next = sym in ".!?…"
@@ -244,7 +248,7 @@ def collapse_repeats(text, min_words=2, max_words=10):
                 best = (reps, size)
         if best:
             reps, size = best
-            if not (reps >= 4 and reps * size > n / 2):
+            if not (reps >= 4 and reps * size > n / 2 and n >= 20):  # галлюцинация whisper всегда длинная
                 out.extend(words[i:i + size])
             i += reps * size
         else:

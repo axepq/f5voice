@@ -40,6 +40,23 @@ class SplitCommand(unittest.TestCase):
             self.assertEqual(body, "Скиньте договор до пятницы.", tail)
             self.assertIsNotNone(cmd, tail)
 
+    def test_single_word_trigger_without_punctuation_is_plain_speech(self):
+        for text in ("Я хочу сказать это короче", "Объясни мне это понятнее.", "Мы обсудили это чисто технически.",
+                     "Он говорит по-английски", "Пиши грамотно", "Всё сделано официально.",
+                     "Скажи, что нового на английском"):
+            self.assertEqual(rewrite.split_command(text), (text, None), text)
+
+    def test_multi_word_trigger_without_punctuation_is_command(self):
+        body, cmd = rewrite.split_command("Скиньте договор до пятницы официальный стиль")
+        self.assertEqual((body, cmd["key"]), ("Скиньте договор до пятницы", "official"))
+
+    def test_keyword_after_comma_needs_colon(self):
+        for text in ("Привет, команда, как дела?", "Всем привет, команда собирается в пять.",
+                     "Наша компания, команда разработчиков сделает всё"):
+            self.assertEqual(rewrite.split_command(text), (text, None), text)
+        body, cmd = rewrite.split_command("Скиньте до пятницы, команда: сделай списком.")
+        self.assertEqual((body, cmd["key"]), ("Скиньте до пятницы", "free"))
+
     def test_command_alone_is_plain_text(self):
         text = "Официальный стиль."
         self.assertEqual(rewrite.split_command(text), (text, None))
@@ -117,6 +134,11 @@ class Humanize(unittest.TestCase):
 
     def test_inner_quotes_kept(self):
         self.assertEqual(rewrite.humanize("Проект «Альфа» готов."), "Проект «Альфа» готов.")
+        self.assertEqual(rewrite.humanize("«Альфа» и «Бета»"), "«Альфа» и «Бета»")
+
+    def test_dash_keeps_newlines_and_dialogue(self):
+        self.assertEqual(rewrite.humanize("Первое.\n— Второе"), "Первое.\n- Второе")
+        self.assertEqual(rewrite.humanize("— Привет, — сказал он."), "- Привет, - сказал он.")
 
     def test_whitespace_normalized(self):
         self.assertEqual(rewrite.humanize("  а   б \n\n\n\n в  "), "а б\n\nв")
@@ -146,6 +168,12 @@ class Accept(unittest.TestCase):
                     "Текст должен быть переписан в нейтральном стиле без разговорных слов и восклицаний."):
             self.assertFalse(rewrite.accept(self.original, bad, self.official), bad)
             self.assertFalse(rewrite.accept(self.original, bad, self.free), bad)
+
+    def test_polite_openings_accepted(self):
+        for ok in ("Извините, я опоздаю на полчаса из-за пробок. Начинайте без меня.",
+                   "К сожалению, я задержусь на полчаса. Прошу начать без меня.",
+                   "В тексте договора указан неверный срок, прошу исправить."):
+            self.assertTrue(rewrite.accept(self.original, ok, self.official), ok)
 
     def test_normal_accepted(self):
         self.assertTrue(rewrite.accept(self.original, "Добрый день. Прошу исправить сумму в договоре.",

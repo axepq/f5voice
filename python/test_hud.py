@@ -28,7 +28,7 @@ class Frames(unittest.TestCase):
             img = r.frame(state, "Говорите…   Ctrl+Alt+Space — готово", bars, 1.3)
             self.assertEqual(img.mode, "RGBA")
             self.assertEqual(img.height, round((hud.Renderer.H + 2 * hud.Renderer.MARGIN) * 1.5))
-        self.assertLessEqual(max(img.getchannel("A").getdata()), 255)
+        self.assertGreater(max(img.getchannel("A").getdata()), 200)   # плашка непрозрачна внутри
         self.assertEqual(img.getpixel((0, 0))[3], 0)   # угол с тенью прозрачен
 
     def test_old_style_names_map_to_basic_ones(self):

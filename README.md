@@ -131,11 +131,12 @@ Esc     отменить запись или распознавание
 |---|---|
 | src слэш components точка tsx | `src/components.tsx` |
 | alex собака gmail точка com | `alex@gmail.com` |
-| пять минус три равно два | `5 - 3 = 2` |
+| пять минус три равно два | `Пять - три = два` (цифры — как их услышит Whisper) |
 | текст абзац дальше | `текст` ↵ ↵ `Дальше` |
 
-Слова «точка» и «минус» в обычной речи тоже станут символами; лишнее можно
-убрать из списка `COMMANDS` в `common/textproc.py`. Перенос строки
+Слова «точка», «минус», «плюс», «тире», «дробь», «стрелка», «абзац» в обычной
+речи тоже станут символами («всё равно» и «собака» вне адреса не трогаются);
+лишнее можно убрать из списка `COMMANDS` в `common/textproc.py`. Перенос строки
 печатается как Shift+Enter, в терминалах — Option+Enter, чтобы в чатах и в
 Claude Code не отправлять сообщение.
 
@@ -178,7 +179,7 @@ Glass, Liquid Metal, прозрачное стекло, тёмная; «Пока
 остаётся на прежних настройках. Проверить файл без перезапуска:
 
 ```
-~/.f5voice/F5Voice.app/Contents/MacOS/F5Voice --check
+/Applications/F5Voice.app/Contents/MacOS/F5Voice --check
 ```
 
 | ключ | по умолчанию | что |
@@ -238,8 +239,8 @@ F13–F20 ловятся напрямую.
 | `macos/main.swift` | приложение для macOS: перехват клавиши, запись, плашка, меню, печать |
 | `macos/worker.py` | воркер mlx-whisper |
 | `python/dictate.py` | версия для Windows и Linux на faster-whisper |
-| `common/` | общее ядро: `audio_io`, `vad`, `textproc` (команды), `segments`, `selftest` |
-| `~/.f5voice/` | установленное: приложение или окружение, `config.json`, `f5voice.log`, `last.wav`, `src` |
+| `common/` | общее ядро: `audio_io`, `vad`, `textproc` (команды), `segments`, `history`, `rewrite` (переписывание), `selftest` |
+| `~/.f5voice/` | окружение Python, `config.json`, `f5voice.log`, `last.wav`, `history.json`, ссылка `src` на исходники |
 
 Самопроверка ядра без модели: `python -m common.selftest`.
 Если распознало криво — последняя запись лежит в `~/.f5voice/last.wav`,

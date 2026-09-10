@@ -97,6 +97,8 @@ def load_audio(path):
         parsed = reader(path)
         if parsed is not None:
             audio, rate = parsed
-            if audio.size >= TARGET_RATE // 8:
+            if audio.ndim > 1:  # стерео → моно
+                audio = audio.mean(axis=1).astype(np.float32)
+            if audio.size >= rate // 8:  # 1/8 с в исходной частоте, а не в 16 кГц
                 return resample(audio, rate)
     raise ValueError("не смог прочитать аудио: формат не поддержан или запись пустая")

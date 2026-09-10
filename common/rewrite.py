@@ -35,10 +35,14 @@ COMMANDS = {
 }
 
 _END = r"\s*[.!?…]*\s*$"                  # хвостовые знаки после команды
-_BEFORE = r"(?:^|(?<=[.!?,;:…])\s*|\s+)"  # команда — отдельное предложение или после знака
 # «сделай в официальном стиле», «напиши официально», «а теперь короче» — глагол-обёртка перед триггером
-_VERB = (r"(?:(?:а\s+)?(?:теперь\s+)?(?:сделай|сделать|напиши|написать|перепиши|переписать|переделай|"
-         r"переведи|перевести|давай|пожалуйста)\s+)*(?:это\s+)?")
+_VERBS = (r"(?:(?:а\s+)?(?:теперь\s+)?(?:сделай|сделать|напиши|написать|перепиши|переписать|переделай|"
+          r"переведи|перевести|давай|пожалуйста)\s+)")
+_AFTER_PUNCT = r"(?:^|(?<=[.!?,;:…]))\s*" + _VERBS + r"*(?:это\s+)?"
+# Триггер из одного слова («короче», «понятнее», «технически») без знака перед ним — это обычная речь
+# («я хочу сказать это короче»); без знака он считается командой только с глаголом-обёрткой.
+_LOOSE_MULTI = r"(?:" + _AFTER_PUNCT + r"|\s+" + _VERBS + r"*(?:это\s+)?)"
+_LOOSE_SINGLE = r"(?:" + _AFTER_PUNCT + r"|\s+" + _VERBS + r"+(?:это\s+)?)"
 
 
 def merge_commands(user=None):
@@ -64,12 +68,22 @@ def merge_commands(user=None):
 def _fixed(text, commands):
     """Фиксированная команда в хвосте: (тело, команда) или None."""
     for key, (triggers, instruction) in commands.items():
-        alts = "|".join(re.escape(t.strip()) for t in triggers.split("|") if t.strip())
-        m = re.search(_BEFORE + _VERB + r"(?P<t>" + alts + r")" + _END, text, flags=re.IGNORECASE)
+        words = [t.strip() for t in triggers.split("|") if t.strip()]
+        # без знака перед собой допустимы только «…стиль/стилем»: «на английском», «исправь ошибки»
+        # в конце обычной фразы встречаются и без команды
+        multi = "|".join(re.escape(t) for t in words if " " in t and "стил" in t)
+        single = "|".join(re.escape(t) for t in words if not (" " in t and "стил" in t))
+        alts = []
+        if multi:
+            alts.append(_LOOSE_MULTI + r"(?P<m>" + multi + r")")
+        if single:
+            alts.append(_LOOSE_SINGLE + r"(?P<s>" + single + r")")
+        m = re.search(r"(?:" + "|".join(alts) + r")" + _END, text, flags=re.IGNORECASE)
         if m:
             body = text[:m.start()].rstrip().rstrip(",;:")
             if body:
-                return body, {"key": key, "title": m.group("t").lower(), "instruction": instruction}
+                title = (m.groupdict().get("m") or m.groupdict().get("s")).lower()
+                return body, {"key": key, "title": title, "instruction": instruction}
     return None
 
 
@@ -80,7 +94,10 @@ def split_command(text, commands=None, keyword=DEFAULT_KEYWORD):
     text = (text or "").strip()
     commands = commands if commands is not None else COMMANDS
     if keyword:
-        m = re.search(r"(?<=[.!?,;:…])\s*" + re.escape(keyword) + r"\s*[:,]?\s+(?P<i>.{3,})$",
+        kw = re.escape(keyword)
+        # после конца предложения — с двоеточием или без; после запятой — только с двоеточием,
+        # иначе «Привет, команда, как дела?» уйдёт в модель
+        m = re.search(r"(?:(?<=[.!?…])\s*" + kw + r"\s*[:,]?\s+|(?<=[,;:])\s*" + kw + r"\s*:\s*)(?P<i>.{3,})$",
                       text, flags=re.IGNORECASE | re.DOTALL)
         if m:
             body = text[:m.start()].rstrip().rstrip(",;:")
@@ -124,22 +141,28 @@ def build_messages(text, cmd):
 
 
 # Модель вместо переписывания рассуждает о тексте или отказывается — такой ответ вставлять нельзя.
-_META = re.compile(r"^(?:в (?:данном |этом |исходном )?тексте|(?:данный |этот |исходный )?текст (?:должен|не |содержит|написан)|"
-                   r"я не могу|извините|к сожалению|как (?:языковая )?модель|не могу (?:выполнить|переписать))|"
-                   r"не соответству\w+ требованиям|должен быть переписан", re.IGNORECASE)
+_META = re.compile(
+    r"^(?:извините|к сожалению|прошу прощения)\W+(?:но\s+)?(?:я\s+)?не (?:могу|смогу)|"
+    r"^в (?:данном |этом |исходном |вашем )?тексте (?:присутству|использу|есть|содерж|нет|имеются|встреча)|"
+    r"^(?:данный |этот |исходный |ваш )?текст (?:должен|не соответствует|содержит|написан|нельзя|невозможно)|"
+    r"я не (?:могу|смогу) (?:выполнить|переписать|помочь|это)|как (?:языковая |ии[- ])?модель|"
+    r"не соответству\w+ требованиям|должен быть переписан", re.IGNORECASE)
 
 
 def humanize(text):
     """Снять следы ИИ, которые модель выдаёт вопреки инструкции: длинное тире, markdown,
     тройные восклицания, блок размышлений, кавычки вокруг всего ответа."""
     t = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
-    if len(t) >= 2 and ((t[0] == "«" and t[-1] == "»") or (t[0] == t[-1] == '"')):
-        t = t[1:-1].strip()
-    t = re.sub(r"\s*[—–]\s*", " - ", t)
+    inner = t[1:-1]
+    if len(t) >= 2 and ((t[0] == "«" and t[-1] == "»" and "«" not in inner and "»" not in inner)
+                        or (t[0] == t[-1] == '"' and '"' not in inner)):
+        t = inner.strip()  # кавычки вокруг всего ответа; «Альфа» и «Бета» — не трогаем
     t = re.sub(r"^#{1,6}\s*", "", t, flags=re.MULTILINE)
     t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
     t = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"\1", t)
-    t = re.sub(r"^\s*[-*•]\s+", "", t, flags=re.MULTILINE)
+    t = re.sub(r"^[ \t]*[-*•][ \t]+", "", t, flags=re.MULTILINE)   # маркеры списков — до замены тире
+    t = re.sub(r"[ \t]*[—–][ \t]*", " - ", t)                      # перенос строки не съедаем
+    t = re.sub(r"^ - ", "- ", t, flags=re.MULTILINE)                  # диалоговое тире в начале строки
     t = re.sub(r"!{2,}", "!", t)
     t = re.sub(r"[ \t]+", " ", t)
     t = re.sub(r" *\n *", "\n", t)

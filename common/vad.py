@@ -21,12 +21,16 @@ def speech_seconds(audio, rate=RATE):
     frames = np.asarray(audio[: n * frame], dtype=np.float64).reshape(n, frame)
     rms = np.sqrt((frames ** 2).mean(axis=1))
     floor = float(np.percentile(rms, 10))
-    thr = max(0.006, 0.1 * float(rms.max()), min(3.0 * floor, 0.015))
+    loud = float(np.percentile(rms, 95))  # не max: один щелчок клавиши не должен глушить тихую речь
+    thr = max(0.006, 0.1 * loud, min(3.0 * floor, 0.015))
     return float((rms > thr).sum() * FRAME_SEC)
 
 
 def is_silence(audio, rate=RATE):
     """(тишина?, длительность, секунд речи)."""
+    audio = np.asarray(audio)
+    if audio.ndim > 1:  # стерео → моно
+        audio = audio.mean(axis=1)
     dur = audio.size / rate
     speech = speech_seconds(audio, rate)
     return (dur < MIN_DUR_SEC or speech < MIN_SPEECH_SEC), round(dur, 2), round(speech, 2)

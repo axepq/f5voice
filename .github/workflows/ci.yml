@@ -22,13 +22,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install numpy pyflakes Pillow
-      - run: python -m pyflakes common python macos/worker.py
+      - run: python -m pyflakes common python macos/worker.py macos/llm.py
       - run: python -m common.selftest
       - run: python python/test_control.py
       - run: python python/test_dictate.py
       - run: python python/test_history.py
       - run: python python/test_hud.py
       - run: python python/test_rewrite.py
+      - run: python python/test_textproc.py
 
   macos:
     # Приложение для macOS собирается системным swiftc, как у пользователя.
@@ -40,6 +41,16 @@ jobs:
       - name: check
         run: F5VOICE_HOME="$RUNNER_TEMP/f5voice" "$RUNNER_TEMP/f5voice/F5Voice.app/Contents/MacOS/F5Voice" --check
       - run: zsh -n macos/build.sh macos/make-icon.sh
+      # Ядро на macOS: единственный путь через afconvert и модуль модели проверяются только здесь.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pyflakes
+      - run: python -m pyflakes common macos/worker.py macos/llm.py
+      - run: python -m common.selftest
+      - run: python python/test_rewrite.py
+      - run: python python/test_textproc.py
+      - run: python python/test_history.py
 
   installers:
     # Установщики: синтаксис bash, shellcheck, разбор PowerShell и только ASCII в .ps1
