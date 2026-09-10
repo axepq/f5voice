@@ -21,12 +21,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install numpy pyflakes
+      - run: pip install numpy pyflakes Pillow
       - run: python -m pyflakes common python macos/worker.py
       - run: python -m common.selftest
       - run: python python/test_control.py
       - run: python python/test_dictate.py
       - run: python python/test_history.py
+      - run: python python/test_hud.py
 
   macos:
     # Приложение для macOS собирается системным swiftc, как у пользователя.

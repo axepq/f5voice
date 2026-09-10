@@ -16,7 +16,6 @@
 что-то падает — пришлите ~/.f5voice/f5voice.log.
 """
 import argparse
-import collections
 import ctypes
 import json
 import math
@@ -54,6 +53,7 @@ from common.vad import is_silence  # noqa: E402
 from common import history  # noqa: E402
 
 import control  # noqa: E402  (python/control.py: единственный экземпляр, --toggle, окно по ярлыку)
+import hud  # noqa: E402  (python/hud.py: плашка — рендер Pillow, слоистое окно на Windows)
 
 RATE = 16000
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")              # классическая загрузка вместо hf_xet
@@ -81,7 +81,7 @@ DEFAULTS = {
     "input_device": None,              # номер или имя из --list-devices, None — по умолчанию
     "tray": True,                      # значок в области уведомлений (нужны pystray и Pillow)
     "hud": True,                       # плашка внизу экрана: запись, уровень, распознавание, результат
-    "style": "glass",                  # glass | metal | light | dark — вид плашки (стекло через DWM на Windows 11)
+    "style": "dark",                   # dark | light | graphite — вид плашки (объёмная капсула с тенью)
     "cpu_threads": 0,                  # потоков для CTranslate2 на процессоре, 0 — по числу ядер
     "beam_size": 0,                    # ширина поиска, 0 — авто: 1 на процессоре (быстро), 5 на видеокарте
 }
@@ -611,321 +611,119 @@ class Typist:
 # ---------------------------------------------------------------- плашка на экране
 
 class HUD(threading.Thread):
-    """Плашка внизу экрана, как на маке: точка, полоски уровня, текст. tkinter в своём потоке."""
+    """Плашка внизу экрана и окно настроек. Кадры рисует python/hud.py (Pillow); на Windows их
+    показывает слоистое окно с попиксельной прозрачностью, на Linux — окно tkinter поверх
+    непрозрачного фона. tkinter живёт в своём потоке; корень скрыт и нужен для окна настроек."""
 
-    COLORS = {"recording": "#ff4d4d", "transcribing": "#ffb347", "ok": "#5ad36b", "error": "#ff8a5c", "info": "#dddddd"}
-    STYLES = {  # фон плашки, цвет текста, тёмная ли тема для стекла DWM
-        "glass": ("#16161c", "#ffffff", True),
-        "metal": ("#111114", "#f2f2f2", True),   # тёмное стекло в хромовом кольце «жидкого металла»
-        "light": ("#f2f2f5", "#111111", False),
-        "dark": ("#0d0d10", "#ffffff", True),
-    }
-    TICK_MS = 33          # 30 кадров в секунду
-    GLINT_SECONDS = 5.0   # один оборот блика по кольцу
-    KEY = "#141516"       # «прозрачный» цвет окна на Windows: снаружи капсулы и под стеклом DWM
-    SS = 3                # суперсэмплинг: холст tkinter не сглаживает, рисуем через Pillow втрое крупнее
-    ALPHA = 0.94          # непрозрачность плашки; появление и уход — плавным затуханием
+    TICK_MS = 33
 
-    def __init__(self, app, level_fn, style="glass"):
+    def __init__(self, app, level_fn, style="dark"):
         super().__init__(daemon=True)
         self.app = app
         self.level_fn = level_fn
-        self.style = style if style in self.STYLES else "glass"
+        self.style = hud.norm_style(style)
         self.settings_win = None
         self.q = queue.Queue()
-        self.state = None
-        self.text = ""
-        self.hide_at = None
-        self.phase = 0.0
-        self.hist = collections.deque([0.0] * 11, maxlen=11)   # 10 видимых столбиков + въезжающий справа
-        self.scroll = 0.0       # сдвиг столбиков в пикселях, 0…6
-        self.level = 0.0        # сглаженный уровень
-        self.glint = 0.0        # положение блика на кольце, доля контура
-        self.alpha = 0.0        # текущая прозрачность окна
-        self.alpha_target = 0.0
-        self.closing = False
+        self.layered = None
+        self.canvas = None
+        self.shown = False
         self.start()
 
     def show(self, state, text, ttl=None):
-        self.q.put(("show", state, text, ttl))
+        if self.layered:
+            self.layered.show(state, text, ttl)
+        else:
+            self.q.put(("show", state, text, ttl))
 
     def hide(self):
-        self.q.put(("hide", None, None, None))
+        if self.layered:
+            self.layered.hide()
+        else:
+            self.q.put(("hide", None, None, None))
 
     def open_settings(self):
         self.q.put(("settings", None, None, None))
-
-    def _apply_windows_glass(self, root):
-        """Windows 11: акриловое стекло и скруглённые углы через DWM; иначе просто тёмная панель.
-        Стиль metal — без акрила: снаружи капсулы окно прозрачное, внутри тёмное стекло и кольцо."""
-        if not IS_WINDOWS:
-            return
-        try:
-            root.update_idletasks()
-            if self.style == "metal":
-                root.attributes("-transparentcolor", self.KEY)
-                self.canvas.configure(bg=self.KEY)
-                self.cutout = True
-                return
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-            dwm = ctypes.windll.dwmapi
-            corner = ctypes.c_int(2)  # DWMWCP_ROUND
-            dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), 4)
-            if self.style != "dark":
-                dark = ctypes.c_int(1 if self.STYLES[self.style][2] else 0)
-                dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)
-                backdrop = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW — акрил
-                if dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(backdrop), 4) == 0:
-                    root.attributes("-transparentcolor", self.KEY)
-                    self.canvas.configure(bg=self.KEY)
-                    self.glass = True
-        except Exception as e:  # noqa: BLE001
-            log(f"стекло DWM недоступно ({e}) — обычная панель")
 
     def run(self):
         try:
             import tkinter as tk
         except ImportError:
-            log("плашка недоступна: нет tkinter (Linux: sudo apt install python3-tk)")
+            log("окно настроек и плашка недоступны: нет tkinter (Linux: sudo apt install python3-tk)")
             return
         try:
             root = tk.Tk()
             root.withdraw()
-            root.overrideredirect(True)
-            root.attributes("-topmost", True)
-            self.can_fade = True
-            try:
-                root.attributes("-alpha", 0.0)
-            except tk.TclError:
-                self.can_fade = False
-            self.W, self.H = 460, 56
-            bg, self.fg, _ = self.STYLES[self.style]
-            self.bg = bg
-            self.glass = False
-            self.cutout = False
-            self.canvas = tk.Canvas(root, width=self.W, height=self.H, bg=bg, highlightthickness=0)
-            self.canvas.pack()
-            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-            root.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 80}")
-            self.root = root
-            self.tk = tk
-            try:  # сглаженная отрисовка через Pillow; без него — обычный холст
-                from PIL import Image, ImageDraw, ImageTk
-                self.pil = (Image, ImageDraw, ImageTk)
-            except ImportError:
-                self.pil = None
-            self._apply_windows_glass(root)
+            self.root, self.tk = root, tk
+            if IS_WINDOWS:
+                layered = hud.LayeredHud(self.style, self.level_fn, log)
+                layered.start()
+                layered.ok.wait(5)
+                if layered.ok.is_set() and not layered.failed:
+                    self.layered = layered
+            if not self.layered:
+                self._make_canvas(root, tk)
             root.after(self.TICK_MS, self._tick)
             root.mainloop()
         except Exception as e:  # noqa: BLE001
             log(f"плашка отключена: {type(e).__name__}: {e}")
 
-    def _set_alpha(self, a):
-        self.alpha = a
-        if self.can_fade:
-            try:
-                self.root.attributes("-alpha", a)
-            except self.tk.TclError:
-                self.can_fade = False
+    def _make_canvas(self, root, tk):
+        """Linux (и запасной путь на Windows): кадр поверх непрозрачного фона в окне tkinter."""
+        from PIL import Image, ImageTk
+
+        self.Image, self.ImageTk = Image, ImageTk
+        self.hstate = hud.HudState(self.level_fn)
+        self.renderer = hud.Renderer(self.style, scale=1.0, shadow=False)
+        self.bg = hud.STYLES[self.style]["bottom"][:3]
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        self.canvas = tk.Canvas(root, highlightthickness=0, bg="#%02x%02x%02x" % self.bg)
+        self.canvas.pack()
 
     def _tick(self):
         try:
             while True:
                 cmd, state, text, ttl = self.q.get_nowait()
-                if cmd == "show":
-                    self.state, self.text = state, text
-                    self.hide_at = time.time() + ttl if ttl else None
-                    if state == "recording":
-                        self.hist.extend([0.0] * len(self.hist))
-                        self.level = 0.0
-                    self.closing = False
-                    self.alpha_target = self.ALPHA
-                    if self.root.state() == "withdrawn":
-                        self._set_alpha(0.0)
-                        self.root.deiconify()
-                    self.root.lift()
-                elif cmd == "settings":
+                if cmd == "settings":
                     self._settings_window()
-                else:
-                    self.closing = True
-                    self.alpha_target = 0.0
+                elif self.canvas is not None:
+                    if cmd == "show":
+                        self.hstate.show(state, text, ttl)
+                    else:
+                        self.hstate.hide()
         except queue.Empty:
             pass
-        if self.hide_at and time.time() > self.hide_at:
-            self.hide_at = None
-            self.closing = True
-            self.alpha_target = 0.0
-        # Плавное появление (≈130 мс) и уход (≈200 мс)
-        if self.alpha != self.alpha_target:
-            step = 0.25 if self.alpha_target > self.alpha else -0.16
-            a = self.alpha + step
-            if (step > 0 and a >= self.alpha_target) or (step < 0 and a <= self.alpha_target):
-                a = self.alpha_target
-            self._set_alpha(a)
-            if not self.can_fade:
-                self.alpha = self.alpha_target
-        if self.closing and self.alpha <= 0.0:
-            self.closing = False
-            self.state = None
-            self.root.withdraw()
-        if self.state:
-            self._draw()
+        if self.canvas is not None and self.hstate.active:
+            if self.hstate.step():
+                self.root.withdraw()
+                self.shown = False
+            else:
+                self._draw_canvas()
         self.root.after(self.TICK_MS, self._tick)
 
-    @staticmethod
-    def _blend(fg, bg, t):
-        """Цвет между bg (t=0) и fg (t=1) — замена прозрачности, которой у canvas нет."""
-        t = max(0.0, min(1.0, t))
-        f = [int(fg[i:i + 2], 16) for i in (1, 3, 5)]
-        b = [int(bg[i:i + 2], 16) for i in (1, 3, 5)]
-        return "#%02x%02x%02x" % tuple(int(b[i] + (f[i] - b[i]) * t) for i in range(3))
-
-    def _pill_points(self, n, inset):
-        """n точек по периметру плашки-капсулы (по часовой, старт слева вверху)."""
-        w, h = self.W - 2 * inset, self.H - 2 * inset
-        r = h / 2
-        straight = w - 2 * r
-        total = 2 * straight + 2 * math.pi * r
-        pts = []
-        for i in range(n + 1):
-            d = total * i / n
-            if d < straight:
-                x, y = r + d, 0
-            elif d < straight + math.pi * r:
-                a = (d - straight) / r - math.pi / 2
-                x, y = w - r + r * math.cos(a), r + r * math.sin(a)
-            elif d < 2 * straight + math.pi * r:
-                x, y = w - r - (d - straight - math.pi * r), h
-            else:
-                a = (d - 2 * straight - math.pi * r) / r + math.pi / 2
-                x, y = r + r * math.cos(a), r + r * math.sin(a)
-            pts.append((x + inset, y + inset))
-        return pts
-
-    def _draw_metal_ring(self, c, width=3):
-        """Стальное кольцо (светлее сверху, темнее снизу) и одна мягкая полоска света по контуру."""
-        pts = self._pill_points(96, width / 2 + 1)
-        n = len(pts) - 1
-        self.glint = (self.glint + self.TICK_MS / 1000.0 / self.GLINT_SECONDS) % 1.0
-        for i in range(n):
-            (x0, y0), (x1, y1) = pts[i], pts[i + 1]
-            ny = (y0 + y1) / 2 / self.H                      # 0 — верх, 1 — низ
-            base = 160 - 95 * ny
-            d = (self.glint - i / n) % 1.0                   # сколько контура позади вершины полоски
-            if d < 0.22:                                     # хвост: плавно гаснет назад
-                k = (1.0 - d / 0.22) ** 2
-            elif d > 1.0 - 0.06:                             # перед вершиной: короткий мягкий край
-                k = (1.0 - (1.0 - d) / 0.06) ** 2
-            else:
-                k = 0.0
-            v = int(base + (255 - base) * k)
-            c.create_line(x0, y0, x1, y1, fill=f"#{v:02x}{v:02x}{min(255, v + 4):02x}", width=width, capstyle="round")
-
-    def _bars(self):
-        """Столбики уровня для текущего кадра: (x, высота, доля яркости) в координатах плашки."""
-        out = []
-        x = 46
-        if self.state == "recording":
-            self.level += (float(self.level_fn() or 0.0) - self.level) * 0.5
-            self.scroll += 2.0
-            if self.scroll >= 6.0:
-                self.scroll -= 6.0
-                self.hist.append(max(0.0, min(1.0, self.level)))
-            f = self.scroll / 6.0
-            for i in range(11):
-                fade = 1.0 - f if i == 0 else (f if i == 10 else 1.0)
-                out.append((x + i * 6 - self.scroll, 3 + 20 * self.hist[i], fade))
-        elif self.state == "transcribing":
-            for i in range(10):
-                v = 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
-                out.append((x + i * 6, 3 + 20 * v, 1.0))
-        return out
-
-    def _draw_pil(self):
-        """Кадр через Pillow: рисуем в SS раз крупнее и уменьшаем с фильтром — края гладкие."""
-        Image, ImageDraw, ImageTk = self.pil
-        S = self.SS
-        W, H = self.W * S, self.H * S
-        img = Image.new("RGB", (W, H), self.KEY if (self.cutout or self.glass) else self.bg)
-        d = ImageDraw.Draw(img)
-        self.phase += 0.18
-        color = self.COLORS.get(self.state, "#ffffff")
-        cy = H / 2
-        if self.style == "metal":
-            if self.cutout:
-                d.rounded_rectangle((S, S, W - S, H - S), radius=(H - 2 * S) / 2, fill=self.bg)
-            pts = self._pill_points(96, 2.5)
-            n = len(pts) - 1
-            self.glint = (self.glint + self.TICK_MS / 1000.0 / self.GLINT_SECONDS) % 1.0
-            w = 3 * S
-            for i in range(n):
-                (x0, y0), (x1, y1) = pts[i], pts[i + 1]
-                base = 160 - 95 * ((y0 + y1) / 2 / self.H)
-                dist = (self.glint - i / n) % 1.0
-                if dist < 0.22:
-                    k = (1.0 - dist / 0.22) ** 2
-                elif dist > 1.0 - 0.06:
-                    k = (1.0 - (1.0 - dist) / 0.06) ** 2
-                else:
-                    k = 0.0
-                v = int(base + (255 - base) * k)
-                col = (v, v, min(255, v + 4))
-                d.line((x0 * S, y0 * S, x1 * S, y1 * S), fill=col, width=w)
-                d.ellipse((x0 * S - w / 2, y0 * S - w / 2, x0 * S + w / 2, y0 * S + w / 2), fill=col)
-        r = (7 + 2.5 * (0.5 + 0.5 * math.sin(self.phase * 0.6))) * S if self.state == "recording" else 7 * S
-        d.ellipse((22 * S - r, cy - r, 22 * S + r, cy + r), fill=color)
-        bars = self._bars()
-        for bx, h, fade in bars:
-            d.rounded_rectangle((bx * S, cy - h * S / 2, (bx + 3) * S, cy + h * S / 2), radius=1.5 * S,
-                                fill=self._blend(self.fg, self.bg, fade))
-        img = img.resize((self.W, self.H), Image.LANCZOS)
-        self._photo = ImageTk.PhotoImage(img)
+    def _draw_canvas(self):
+        st = self.hstate
+        img = self.renderer.frame(st.state, st.text, st.bars(), st.phase)
+        base = self.Image.new("RGB", img.size, self.bg)
+        base.paste(img, mask=img)
+        self._photo = self.ImageTk.PhotoImage(base)
         c = self.canvas
         c.delete("all")
         c.create_image(0, 0, anchor="nw", image=self._photo)
-        c.create_text(46 + 70 if bars else 46, self.H / 2, text=self.text, anchor="w", fill=self.fg, font=("Segoe UI", 12))
-
-    def _draw(self):
-        if self.pil:
-            return self._draw_pil()
-        c = self.canvas
-        c.delete("all")
-        self.phase += 0.18
-        color = self.COLORS.get(self.state, "#ffffff")
-        cy = self.H / 2
-        if self.style == "metal":
-            if self.cutout:  # капсула на прозрачном окне
-                c.create_polygon(*[v for xy in self._pill_points(96, 1) for v in xy], fill=self.bg, outline="")
-            self._draw_metal_ring(c)
-        r = 7 + (2.5 * (0.5 + 0.5 * math.sin(self.phase * 0.6)) if self.state == "recording" else 0)
-        c.create_oval(22 - r, cy - r, 22 + r, cy + r, fill=color, outline="")
-        x = 46
-        if self.state == "recording":
-            # Столбики едут влево непрерывно (2 px за кадр), новый отсчёт въезжает справа и проявляется
-            self.level += (float(self.level_fn() or 0.0) - self.level) * 0.5
-            self.scroll += 2.0
-            if self.scroll >= 6.0:
-                self.scroll -= 6.0
-                self.hist.append(max(0.0, min(1.0, self.level)))
-            f = self.scroll / 6.0
-            for i in range(11):
-                v = self.hist[i]
-                h = 3 + 20 * v
-                fade = 1.0
-                if i == 0:
-                    fade = 1.0 - f
-                elif i == 10:
-                    fade = f
-                bx = x + i * 6 - self.scroll
-                c.create_rectangle(bx, cy - h / 2, bx + 3, cy + h / 2, fill=self._blend(self.fg, self.bg, fade), outline="")
-            x += 70
-        elif self.state == "transcribing":
-            for i in range(10):
-                v = 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
-                h = 3 + 20 * v
-                c.create_rectangle(x + i * 6, cy - h / 2, x + i * 6 + 3, cy + h / 2, fill=self.fg, outline="")
-            x += 70
-        c.create_text(x, cy, text=self.text, anchor="w", fill=self.fg, font=("Segoe UI", 12))
+        size = (img.width, img.height)
+        if not self.shown or size != getattr(self, "_size", None):
+            self._size = size
+            c.config(width=img.width, height=img.height)
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            self.root.geometry(f"{img.width}x{img.height}+{(sw - img.width) // 2}+{sh - img.height - 80}")
+        if not self.shown:
+            self.root.deiconify()
+            self.root.lift()
+            self.shown = True
+        try:
+            self.root.attributes("-alpha", max(0.02, st.alpha))
+        except self.tk.TclError:
+            pass
 
     def _logo(self, tk):
         """Иконка 48 px для шапки окна (PNG рядом со скриптом), без Pillow."""
@@ -976,7 +774,7 @@ class HUD(threading.Thread):
 
         cfg = dict(app.cfg)
         rows = [("Сочетание клавиш", "hotkey", None), ("Запись", "record_mode", list(RECORD_MODES.values())),
-                ("Стиль плашки", "style", list(self.STYLES)),
+                ("Стиль плашки", "style", list(hud.STYLE_TITLES.values())),
                 ("Языки (первый — основной)", "languages", None),
                 ("Модель", "model", ["large-v3-turbo", "medium", "small"]),
                 ("Перенос строки клавишей", "newline", ["shift+enter", "enter", "ctrl+enter"])]
@@ -986,6 +784,8 @@ class HUD(threading.Thread):
             value = pretty_hotkey(normalize_hotkey(cfg.get(key) or "")) if key == "hotkey" else str(cfg.get(key, ""))
             if key == "record_mode":
                 value = RECORD_MODES.get(cfg.get(key) or "auto", RECORD_MODES["auto"])
+            if key == "style":
+                value = hud.STYLE_TITLES[hud.norm_style(cfg.get(key))]
             v = tk.StringVar(value=value)
             vars_[key] = v
             if options:
@@ -1033,6 +833,7 @@ class HUD(threading.Thread):
             for key, v in vars_.items():
                 cfg[key] = v.get().strip()
             cfg["record_mode"] = next((k for k, v in RECORD_MODES.items() if v == cfg["record_mode"]), "auto")
+            cfg["style"] = next((k for k, v in hud.STYLE_TITLES.items() if v == cfg["style"]), hud.norm_style(cfg["style"]))
             cfg["trailing_space"] = bool(trailing.get())
             if cfg.get("model") != app.cfg.get("model"):
                 cfg.pop("backend_checked", None)
@@ -1213,7 +1014,7 @@ class App:
             log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
                 "выбрать: \"input_device\" в config.json")
             sys.exit(1)
-        self.hud = HUD(self, lambda: self.recorder.level, cfg.get("style", "glass")) if cfg.get("hud", True) else None
+        self.hud = HUD(self, lambda: self.recorder.level, cfg.get("style", "dark")) if cfg.get("hud", True) else None
         self.hotkey_title = pretty_hotkey(normalize_hotkey(cfg["hotkey"]))
         self.gate = HoldGate(cfg.get("record_mode", "auto"))
         self.hold_hint = None

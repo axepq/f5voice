@@ -31,6 +31,9 @@ if ! xcode-select -p >/dev/null 2>&1; then
     until xcode-select -p >/dev/null 2>&1; do
         sleep 10
         waited=$((waited + 10))
+        if (( waited % 60 == 0 )); then
+            echo "  жду Command Line Tools… $((waited / 60)) мин. Окна не было? В другом окне Терминала: xcode-select --install"
+        fi
         [[ $waited -ge 3600 ]] && fail "Command Line Tools так и не появились. Поставь их и запусти команду снова."
     done
     sleep 5
