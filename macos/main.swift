@@ -44,8 +44,8 @@ let rewriteModels = [
 ]
 /// Провайдеры облачного переписывания: (id, подпись, адрес, модель по умолчанию). Дублирует apillm.PROVIDERS.
 let rewriteProviders: [(id: String, label: String, url: String, model: String)] = [
-    ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
-    ("grok", "xAI Grok", "https://api.x.ai/v1", "grok-3"),
+    ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-flash"),
+    ("grok", "xAI Grok", "https://api.x.ai/v1", "grok-4.20-0309-non-reasoning"),
     ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
     ("custom", "Свой (укажите адрес)", "", ""),
 ]
@@ -1536,8 +1536,9 @@ final class App: NSObject, NSApplicationDelegate {
         if let err = reply.rewriteError {
             log("переписать не вышло (\(reply.rewrite ?? "?")): \(err) — вставляю исходный текст")
             play("Basso")
-            hud.show("Не смог переписать, вставляю как сказано", symbol: "exclamationmark.triangle.fill",
-                     tint: .systemOrange, hideAfter: 3)
+            let short = err.replacingOccurrences(of: "RuntimeError: ", with: "").prefix(90)
+            hud.show("Не переписал: \(short)", symbol: "exclamationmark.triangle.fill",
+                     tint: .systemOrange, hideAfter: 5)
         } else {
             if let key = reply.rewrite { log("переписано (\(key))") }
             hud.hide()

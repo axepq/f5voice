@@ -10,8 +10,8 @@ import urllib.request
 
 # Готовые провайдеры для окна настроек: имя → (базовый адрес, модель по умолчанию).
 PROVIDERS = {
-    "deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"),
-    "grok": ("https://api.x.ai/v1", "grok-3"),
+    "deepseek": ("https://api.deepseek.com/v1", "deepseek-flash"),
+    "grok": ("https://api.x.ai/v1", "grok-4.20-0309-non-reasoning"),
     "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
 }
 

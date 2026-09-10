@@ -523,7 +523,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         var updates: [String: Any] = ["rewrite_api_provider": prov.id]
         if prov.id != "custom" {
             updates["rewrite_api_url"] = prov.url
-            if app.config.rewriteApiModel.isEmpty { updates["rewrite_api_model"] = prov.model; apiModelField.stringValue = prov.model }
+            updates["rewrite_api_model"] = prov.model  // при смене провайдера подставляем его модель
+            apiModelField.stringValue = prov.model
         }
         app.apply(updates)
         if prov.id == "custom" { status.stringValue = "Свой провайдер: впишите адрес в rewrite_api_url в config.json" }
