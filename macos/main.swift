@@ -1641,6 +1641,26 @@ if !others.isEmpty {
     }
 }
 
+/// Меню «Правка» со стандартными пунктами. Само меню не показывается (приложение в строке меню),
+/// но его горячие клавиши включают вырезать/копировать/вставить/выбрать всё в текстовых полях окна настроек.
+func installEditMenu() {
+    let mainMenu = NSMenu()
+    let editItem = NSMenuItem()
+    mainMenu.addItem(editItem)
+    let edit = NSMenu(title: "Правка")
+    editItem.submenu = edit
+    edit.addItem(NSMenuItem(title: "Отменить", action: Selector(("undo:")), keyEquivalent: "z"))
+    let redo = NSMenuItem(title: "Повторить", action: Selector(("redo:")), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    edit.addItem(redo)
+    edit.addItem(.separator())
+    edit.addItem(NSMenuItem(title: "Вырезать", action: Selector(("cut:")), keyEquivalent: "x"))
+    edit.addItem(NSMenuItem(title: "Копировать", action: Selector(("copy:")), keyEquivalent: "c"))
+    edit.addItem(NSMenuItem(title: "Вставить", action: Selector(("paste:")), keyEquivalent: "v"))
+    edit.addItem(NSMenuItem(title: "Выбрать всё", action: Selector(("selectAll:")), keyEquivalent: "a"))
+    NSApp.mainMenu = mainMenu
+}
+
 let application = NSApplication.shared
 
 // MARK: - Окно ответа («ответь, …»)
@@ -1752,4 +1772,5 @@ final class AnswerPanel: NSObject {
 
 application.setActivationPolicy(.accessory)
 application.delegate = App.shared
+installEditMenu()  // menubar-приложение без меню-бара: без этого Cmd+C/V/A не работают в полях настроек
 application.run()
