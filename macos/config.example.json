@@ -15,7 +15,7 @@
   "rewrite_api_provider": "deepseek",
   "rewrite_api_url": "https://api.deepseek.com/v1",
   "rewrite_api_key": "",
-  "rewrite_api_model": "deepseek-chat",
+  "rewrite_api_model": "deepseek-flash",
   "rewrite_keyword": "команда",
   "rewrite_commands": {},
   "answer_model": "",

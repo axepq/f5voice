@@ -104,34 +104,47 @@ def _fixed(text, commands):
     return None
 
 
-# «сделай в юмористичном стиле», «в дружеском стиле», «поэтичным стилем» — любой стиль, названный
-# в конце: модель придумывает его на ходу. Нужен глагол-обёртка или знак препинания перед оборотом,
-# иначе «мы говорили в этом стиле» ложно сработает. Местоимения-заглушки исключаем.
+# Свободный/шаблонный стиль, названный в конце фразы. Две формы:
+#   имя ПЕРЕД словом стиль: «сделай в юмористичном стиле», «поэтичным стилем»
+#   имя ПОСЛЕ слова стиль:  «стиль официальный», «стиль текста юмористический», «в стиле деловой»
+# Нужен глагол-обёртка или своё предложение перед оборотом, иначе «мне нравится стиль работы» сработает.
 _STYLE_STOP = {"этом", "таком", "том", "каком", "своём", "своем", "любом", "разном", "одном",
-               "хорошем", "плохом", "нашем", "вашем", "прежнем", "живом", "свободном"}
-_STYLE_RX = re.compile(
-    r"(?:"
-    r"(?<=[.!?…])\s*" + _VERBS + r"*(?:это\s+)?(?:в\s+)?"           # своё предложение: «…текст. В научном стиле»
-    r"|(?:(?<=[.!?,;:…])\s*|\s+)" + _VERBS + r"+(?:это\s+)?(?:в\s+)?"  # с глаголом: «сделай в юмористичном стиле»
-    r")"
-    r"(?P<x>[а-яё][а-яё-]*(?:\s+[а-яё][а-яё-]*){0,2})\s+(?:стиле|стилем|стиль)\s*[.!?…]*\s*$",
-    re.IGNORECASE)
+               "хорошем", "плохом", "нашем", "вашем", "прежнем", "живом", "свободном",
+               "работы", "жизни", "общения", "руководства", "управления", "речи", "письма", "текста"}
+_STYLE_ANCHOR = (r"(?:(?<=[.!?…])\s*" + _VERBS + r"*(?:это\s+)?"
+                 r"|(?:(?<=[.!?,;:…])\s*|\s+)" + _VERBS + r"+(?:это\s+)?)")
+_STYLE_NAME = r"(?P<x>[а-яё][а-яё-]*(?:\s+[а-яё][а-яё-]*){0,2})"
+_STYLE_BEFORE = re.compile(_STYLE_ANCHOR + r"(?:в\s+)?" + _STYLE_NAME + r"\s+(?:стиле|стилем)" + _END, re.IGNORECASE)
+_STYLE_AFTER = re.compile(_STYLE_ANCHOR + r"(?:в\s+)?стил(?:ь|е|я|ем|ём)(?:\s+текста)?\s+" + _STYLE_NAME + _END, re.IGNORECASE)
 
 
-def _free_style(text):
-    """(тело, команда free) для «…текст. Сделай в X стиле», иначе None."""
-    m = _STYLE_RX.search(text)
-    if not m:
+def _style_cmd(x, commands):
+    """Имя стиля → команда: если это шаблонный стиль, берём его; иначе свободный, придуманный на ходу."""
+    x = x.strip().rstrip(".!?…").strip()
+    words = x.lower().split()
+    if not words or words[-1] in _STYLE_STOP or words[0] in _STYLE_STOP:
         return None
-    x = m.group("x").strip()
-    if x.split()[-1].lower() in _STYLE_STOP:   # «в этом стиле» — не команда
-        return None
-    body = text[:m.start()].rstrip().rstrip(",;:")
-    if not body:
-        return None
-    return body, {"key": "free", "title": x[:60],
-                  "instruction": f"Перепиши текст в стиле: {x}. Сохрани смысл, факты, числа "
-                                 "и контекст, ничего важного не теряй."}
+    known = _fixed("з. " + x + " стиль", commands) or _fixed("з. " + x, commands)
+    if known:
+        return known[1]
+    return {"key": "free", "title": x[:60],
+            "instruction": f"Перепиши текст в стиле: {x}. Сохрани смысл, факты, числа "
+                           "и контекст, ничего важного не теряй."}
+
+
+def _free_style(text, commands):
+    """(тело, команда) для «…текст. Сделай в X стиле» или «…текст. Стиль X», иначе None."""
+    for rx in (_STYLE_AFTER, _STYLE_BEFORE):
+        m = rx.search(text)
+        if not m:
+            continue
+        cmd = _style_cmd(m.group("x"), commands)
+        if not cmd:
+            continue
+        body = text[:m.start()].rstrip().rstrip(",;:")
+        if body:
+            return body, cmd
+    return None
 
 
 def split_command(text, commands=None, keyword=DEFAULT_KEYWORD):
@@ -158,7 +171,7 @@ def split_command(text, commands=None, keyword=DEFAULT_KEYWORD):
     found = _fixed(text, commands)
     if found:
         return found
-    free = _free_style(text)  # свободный стиль «в X стиле», придуманный на ходу
+    free = _free_style(text, commands)  # свободный/шаблонный стиль, названный в конце
     return free if free else (text, None)
 
 

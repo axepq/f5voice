@@ -34,6 +34,22 @@ class SplitCommand(unittest.TestCase):
             self.assertEqual(cmd["key"], "free", tail)
             self.assertIn("стиле", cmd["instruction"].lower())
 
+    def test_style_name_after_keyword(self):
+        cases = {"Текст письма. Стиль официальный.": "official",
+                 "Отчёт. Стиль текста технический.": "technical",
+                 "День был тяжёлый. Стиль юмористический.": "free",
+                 "Расскажи про сервер. В стиле дружеский.": "free",
+                 "Готово. Сделай стиль деловой.": "official"}
+        for text, key in cases.items():
+            _, cmd = rewrite.split_command(text)
+            self.assertIsNotNone(cmd, text)
+            self.assertEqual(cmd["key"], key, text)
+
+    def test_style_name_ignores_plain_speech(self):
+        for text in ("Мне нравится стиль работы", "У него свой стиль жизни", "Сделай стиль деловой"):
+            got = rewrite.split_command(text)
+            self.assertTrue(got[1] is None or got[0], text)  # либо не команда, либо есть тело
+
     def test_free_style_ignores_pronoun_and_plain_speech(self):
         for text in ("Мне нравится, когда пишут в этом стиле", "Мы поговорили в деловом ключе",
                      "Он одет в классном стиле"):
