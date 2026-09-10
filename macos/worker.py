@@ -16,9 +16,16 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
 Протокол:
   <- {"ready": true, "load_sec": 2.5}
   -> /Users/alex/.f5voice/last.wav
-  <- {"text": "Привет", "lang": "ru", "scores": {"ru": 0.99, "en": 0.01}, "fixed": 0, "dur": 2.1, "sec": 0.8}
+  <- {"status": "rewrite", "command": "официальный стиль"}   только если в хвосте команда
+  <- {"text": "Привет", "lang": "ru", "scores": {"ru": 0.99, "en": 0.01}, "fixed": 0, "dur": 2.1, "sec": 0.8,
+      "rewrite": "official", "rewrite_sec": 3.2}            rewrite_* — только при команде
+  <- {"text": "…исходник без команды…", "rewrite": "official", "rewrite_error": "…"}
   <- {"text": "", "reason": "silence"}       тишина или слишком коротко
   <- {"text": "", "error": "..."}            не смог прочитать файл и т.п.
+
+Настройки переписывания (rewrite_model, rewrite_idle_minutes, rewrite_keyword, rewrite_commands)
+воркер читает из ~/.f5voice/config.json сам, при каждом запросе — правки без перезапуска.
+"rewrite_model": "" выключает переписывание.
 """
 import glob
 import json
@@ -38,6 +45,10 @@ from common.segments import assemble  # noqa: E402
 from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
 from common.vad import is_silence  # noqa: E402
 from common import history  # noqa: E402
+from common import rewrite  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from llm import Rewriter  # noqa: E402
 
 HOME_DIR = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 
@@ -59,6 +70,30 @@ def cache_ready(model):
         "~/.cache/huggingface/hub/models--" + model.replace("/", "--") + "/snapshots/*/config.json"
     )
     return bool(glob.glob(pattern))
+
+
+def log(msg):
+    sys.stderr.write(time.strftime("%H:%M:%S ") + str(msg) + "\n")
+    sys.stderr.flush()
+
+
+def rewrite_settings():
+    """Настройки переписывания из config.json; файл маленький, читаем на каждый запрос."""
+    try:
+        with open(HOME_DIR / "config.json", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    model = cfg.get("rewrite_model", rewrite.DEFAULT_MODEL)
+    minutes = cfg.get("rewrite_idle_minutes", rewrite.DEFAULT_IDLE_MINUTES)
+    try:
+        idle_sec = max(5.0, float(minutes) * 60)
+    except (TypeError, ValueError):
+        idle_sec = rewrite.DEFAULT_IDLE_MINUTES * 60
+    keyword = cfg.get("rewrite_keyword", rewrite.DEFAULT_KEYWORD)
+    return {"model": model if isinstance(model, str) else "", "idle_sec": idle_sec,
+            "keyword": keyword.strip() if isinstance(keyword, str) else "",
+            "commands": rewrite.merge_commands(cfg.get("rewrite_commands"))}
 
 
 def main():
@@ -134,18 +169,27 @@ def main():
     run(warm, LANGS[0])  # прогрев: грузим веса и компилируем ядра
     out({"ready": True, "load_sec": round(time.time() - t0, 1), "langs": list(LANGS), "model": MODEL})
 
+    llm = Rewriter(log)
+    last_use = time.time()
     while True:
-        readable, _, _ = select.select([sys.stdin], [], [], IDLE_SEC)
+        timeout = IDLE_SEC - (time.time() - last_use)
+        if llm.loaded:
+            timeout = min(timeout, llm.idle_left())
+        readable, _, _ = select.select([sys.stdin], [], [], max(0.0, timeout))
         if not readable:
-            out({"bye": "idle"})
-            return
+            if llm.loaded and llm.idle_left() <= 0:
+                llm.unload()
+            if time.time() - last_use >= IDLE_SEC:
+                out({"bye": "idle"})
+                return
+            continue
         line = sys.stdin.readline()
         if not line:  # EOF — приложение закрылось
             return
         path = line.strip()
         if not path:
             continue
-        t1 = time.time()
+        last_use = t1 = time.time()
         try:
             try:
                 audio = load_audio(path)
@@ -157,12 +201,27 @@ def main():
                 out({"text": "", "reason": "silence", "dur": dur, "speech": speech})
                 continue
             text, lang, scores, fixed = recognize(audio)
+            extra = {}
+            rw = rewrite_settings()
+            body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if rw["model"] else (text, None)
+            if cmd:
+                out({"status": "rewrite", "command": cmd["title"]})
+                t2 = time.time()
+                try:
+                    result = rewrite.humanize(llm.rewrite(rw["model"], rewrite.build_messages(body, cmd), rw["idle_sec"]))
+                    if not rewrite.accept(body, result, cmd):
+                        raise ValueError("ответ модели пустой или слишком короткий")
+                    text = result
+                    extra = {"rewrite": cmd["key"], "rewrite_sec": round(time.time() - t2, 2)}
+                except Exception as e:  # noqa: BLE001 — текст терять нельзя, вставляем исходник
+                    text = body
+                    extra = {"rewrite": cmd["key"], "rewrite_error": f"{type(e).__name__}: {e}"}
+                last_use = time.time()
             history.add(HOME_DIR / "history.json", text, lang, time.time() - t1)
             out({"text": text, "lang": lang, "scores": scores, "fixed": fixed,
-                 "dur": dur, "speech": speech, "sec": round(time.time() - t1, 2)})
+                 "dur": dur, "speech": speech, "sec": round(time.time() - t1, 2), **extra})
         except Exception as e:  # noqa: BLE001
             out({"text": "", "error": f"{type(e).__name__}: {e}"})
-
 
 if __name__ == "__main__":
     main()
