@@ -31,6 +31,11 @@ let launchdLabel = "com.alex.f5voice"
 let cancelCode: Int64 = 53                 // Esc
 let spareKeyCode: CGKeyCode = 64           // F17: сюда hidutil переводит выбранную F-клавишу
 let typeQueue = DispatchQueue(label: "f5voice.type", qos: .userInteractive)
+/// Модели распознавания речи для окна настроек: (репозиторий, подпись).
+let whisperModels = [
+    ("mlx-community/whisper-large-v3-turbo", "large-v3-turbo — быстрая (по умолчанию)"),
+    ("mlx-community/whisper-large-v3-mlx", "large-v3 — точнее, но медленнее"),
+]
 /// Модели для переписывания и ответов: (репозиторий, подпись в настройках).
 let rewriteModels = [
     ("mlx-community/Qwen3-4B-Instruct-2507-4bit", "Qwen3 4B — быстрая, 3 ГБ памяти"),

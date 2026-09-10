@@ -40,7 +40,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private var historyStamp: Date?
     private let stylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let languagesField = NSTextField(string: "")
-    private let modelField = NSTextField(string: "")
+    private let modelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let termPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let otherPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let trailingBox = NSButton(checkboxWithTitle: "Ставить пробел после надиктованного текста", target: nil, action: nil)
@@ -57,7 +57,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let thinkingBox = NSButton(checkboxWithTitle: "Подумать перед ответом (точнее, но дольше: 15–40 с)", target: nil, action: nil)
     private let stylesTable = NSTableView()
     private var styles: [(triggers: String, instruction: String)] = []
-    private var modelChoices: [String] = []   // репозитории в порядке пунктов popup
+    private var modelChoices: [String] = []          // модели переписывания/ответов в порядке пунктов popup
+    private var whisperModelChoices: [String] = []   // модели распознавания в порядке пунктов modelPopup
     private var hotkeySpecs: [String] = []
     private var timer: Timer?
     private var updating = false
@@ -184,16 +185,16 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         let styleRow = NSStackView(views: [stylePopup, preview])
         styleRow.spacing = 8
 
-        for field in [languagesField, modelField] {
-            field.delegate = self
-            field.target = self
-            field.action = #selector(fieldChanged)
-            field.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        }
+        languagesField.delegate = self
+        languagesField.target = self
+        languagesField.action = #selector(fieldChanged)
+        languagesField.widthAnchor.constraint(equalToConstant: 300).isActive = true
         languagesField.placeholderString = "ru,en"
         languagesField.toolTip = "Через запятую, первый — основной"
-        modelField.placeholderString = "mlx-community/whisper-large-v3-turbo"
-        modelField.toolTip = "Модель whisper для mlx; другая скачается при первой диктовке"
+        modelPopup.target = self
+        modelPopup.action = #selector(whisperModelChanged)
+        modelPopup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        modelPopup.toolTip = "Модель распознавания речи; другая скачается при первой диктовке (один раз)"
 
         for popup in [termPopup, otherPopup] {
             for (name, text) in newlineNames {
@@ -216,7 +217,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             [label("Запись"), recordPopup],
             [label("Стиль плашки"), styleRow],
             [label("Языки"), languagesField],
-            [label("Модель"), modelField],
+            [label("Модель"), modelPopup],
             [label("Перенос строки в терминале"), termPopup],
             [label("В остальных программах"), otherPopup],
             [NSGridCell.emptyContentView, trailingBox],
@@ -390,7 +391,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         stylePopup.selectItem(at: styleNames.firstIndex { $0.0 == c.style } ?? 0)
         loadHistory(force: true)
         if languagesField.currentEditor() == nil { languagesField.stringValue = c.languages }
-        if modelField.currentEditor() == nil { modelField.stringValue = c.model }
+        var whisperChoices = whisperModels.map { $0.0 }
+        if !whisperChoices.contains(c.model) { whisperChoices.append(c.model) }
+        whisperModelChoices = whisperChoices
+        modelPopup.removeAllItems()
+        for repo in whisperChoices { modelPopup.addItem(withTitle: whisperModels.first { $0.0 == repo }?.1 ?? repo) }
+        modelPopup.selectItem(at: whisperChoices.firstIndex(of: c.model) ?? 0)
         termPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineInTerminals } ?? 0)
         otherPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineElsewhere } ?? 1)
         trailingBox.state = c.trailingSpace ? .on : .off
@@ -540,6 +546,16 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
 
     @objc private func thinkingToggled() { app.apply(["answer_thinking": thinkingBox.state == .on]) }
 
+    @objc private func whisperModelChanged() {
+        guard !updating, modelPopup.indexOfSelectedItem >= 0, modelPopup.indexOfSelectedItem < whisperModelChoices.count else { return }
+        let repo = whisperModelChoices[modelPopup.indexOfSelectedItem]
+        guard repo != app.config.model else { return }
+        app.apply(["model": repo])
+        if !FileManager.default.fileExists(atPath: modelCachePath(repo)) {
+            status.stringValue = "Модель скачается при первой диктовке (несколько ГБ, один раз)"
+        }
+    }
+
     @objc private func modelPopupChanged(_ sender: NSPopUpButton) {
         guard !updating, sender.indexOfSelectedItem >= 0, sender.indexOfSelectedItem < modelChoices.count else { return }
         let repo = modelChoices[sender.indexOfSelectedItem]
@@ -587,9 +603,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         guard !updating else { return }
         var updates: [String: Any] = [:]
         let langs = languagesField.stringValue.trimmingCharacters(in: .whitespaces)
-        let model = modelField.stringValue.trimmingCharacters(in: .whitespaces)
         if !langs.isEmpty, langs != app.config.languages { updates["languages"] = langs }
-        if !model.isEmpty, model != app.config.model { updates["model"] = model }
         if let m = Double(idleField.stringValue.trimmingCharacters(in: .whitespaces)), m >= 0, m != app.config.rewriteIdleMinutes {
             updates["rewrite_idle_minutes"] = max(m, 0.1)
         }

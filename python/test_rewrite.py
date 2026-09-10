@@ -210,15 +210,27 @@ class SplitAnswer(unittest.TestCase):
 
     def test_question_after_keyword(self):
         self.assertEqual(rewrite.split_answer("Ответь, сколько километров от Москвы до Питера?"),
-                         "сколько километров от Москвы до Питера?")
-        self.assertEqual(rewrite.split_answer("ответь мне пожалуйста, что такое DNS"), "что такое DNS")
-        self.assertEqual(rewrite.split_answer("Ответь что такое DNS."), "что такое DNS.")
+                         ("сколько километров от Москвы до Питера?", None))
+        self.assertEqual(rewrite.split_answer("ответь мне пожалуйста, что такое DNS"), ("что такое DNS", None))
+        self.assertEqual(rewrite.split_answer("Ответь что такое DNS."), ("что такое DNS.", None))
+
+    def test_persona_answer(self):
+        q, p = rewrite.split_answer("Ответь как мразь, что думаешь про мой план")
+        self.assertEqual(q, "что думаешь про мой план")
+        self.assertIn("мерзав", p)
+        q, p = rewrite.split_answer("Ответь матом, как дела")
+        self.assertEqual((q, "мат" in p), ("как дела", True))
+        # обычный вопрос, начинающийся с «как» — не персона
+        self.assertEqual(rewrite.split_answer("Ответь, как найти человека по IP"),
+                         ("как найти человека по IP", None))
+        msgs = rewrite.build_answer_messages("как дела", "с матом")
+        self.assertIn("мат", msgs[0]["content"].lower())
 
     def test_whisper_drops_soft_sign(self):
         # Whisper часто теряет мягкий знак: «Ответь» → «Ответ»
         for start in ("Ответ,", "Ответ"):
             q = rewrite.split_answer(start + " как находить человека по IP")
-            self.assertEqual(q, "как находить человека по IP", start)
+            self.assertEqual(q, ("как находить человека по IP", None), start)
         # но «Ответьте на письмо» — диктовка человеку, не вопрос
         self.assertIsNone(rewrite.split_answer("Ответьте на письмо до пятницы"))
 
@@ -227,7 +239,7 @@ class SplitAnswer(unittest.TestCase):
             self.assertIsNone(rewrite.split_answer(text), text)
 
     def test_custom_keyword(self):
-        self.assertEqual(rewrite.split_answer("Вопрос: что такое DNS", keyword="вопрос"), "что такое DNS")
+        self.assertEqual(rewrite.split_answer("Вопрос: что такое DNS", keyword="вопрос"), ("что такое DNS", None))
         self.assertIsNone(rewrite.split_answer("Ответь, что такое DNS", keyword="вопрос"))
 
     def test_answer_messages(self):

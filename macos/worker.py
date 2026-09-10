@@ -86,6 +86,16 @@ def log(msg):
     sys.stderr.flush()
 
 
+def _personas(user):
+    """Встроенные манеры ответа плюс свои из config.json (некорректные записи пропускаем)."""
+    result = dict(rewrite.ANSWER_PERSONAS)
+    if isinstance(user, dict):
+        for k, v in user.items():
+            if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+                result[k.strip().lower()] = v.strip()
+    return result
+
+
 def rewrite_settings():
     """Настройки переписывания из config.json; файл маленький, читаем на каждый запрос."""
     try:
@@ -107,7 +117,8 @@ def rewrite_settings():
             "commands": rewrite.merge_commands(cfg.get("rewrite_commands")),
             "answer_model": answer_model if isinstance(answer_model, str) else "",
             "answer_keyword": answer_keyword.strip() if isinstance(answer_keyword, str) else "",
-            "answer_thinking": bool(cfg.get("answer_thinking", False))}
+            "answer_thinking": bool(cfg.get("answer_thinking", False)),
+            "personas": _personas(cfg.get("answer_personas"))}
 
 
 def on_download(name):
@@ -259,13 +270,14 @@ def main():
             text, lang, scores, fixed = recognize(audio)
             extra = {}
             rw = rewrite_settings()
-            question = rewrite.split_answer(text, rw["answer_keyword"]) if rw["answer_model"] else None
-            if question:  # «ответь, …» — вопрос модели, в текст ничего не вставляется
-                out({"status": "answer", "command": question[:60]})
-                log(f"отвечаю ← {question[:300]}")
+            asked = rewrite.split_answer(text, rw["answer_keyword"], rw["personas"]) if rw["answer_model"] else None
+            if asked:  # «ответь, …» — вопрос модели, в текст ничего не вставляется
+                question, persona = asked
+                out({"status": "answer", "command": (persona + ": " if persona else "") + question[:60]})
+                log(f"отвечаю{' (' + persona + ')' if persona else ''} ← {question[:300]}")
                 t2 = time.time()
                 try:
-                    raw = llm.rewrite(rw["answer_model"], rewrite.build_answer_messages(question), rw["idle_sec"],
+                    raw = llm.rewrite(rw["answer_model"], rewrite.build_answer_messages(question, persona), rw["idle_sec"],
                                       max_tokens=1500, thinking=rw["answer_thinking"], on_download=on_download)
                     answer = rewrite.humanize(raw)
                     if not answer:

@@ -251,20 +251,60 @@ def _answer_alts(keyword):
     return re.escape(kw[:-1]) + "ь?" if kw.endswith("ь") else re.escape(kw)
 
 
-def split_answer(text, keyword=ANSWER_KEYWORD):
-    """«Ответь, сколько километров от Москвы до Питера» → вопрос без ключевого слова, иначе None.
-    Ключевое слово — только самое первое слово фразы; «Ответь» без вопроса — обычный текст."""
+def split_answer(text, keyword=ANSWER_KEYWORD, personas=None):
+    """«Ответь, сколько километров от Москвы до Питера» → (вопрос, None), иначе None.
+    «Ответь как мразь, что думаешь про X» → (вопрос, «в образе…»). Ключевое слово — только
+    самое первое слово фразы; «Ответь» без вопроса — обычный текст."""
     text = (text or "").strip()
     if not keyword:
         return None
-    m = re.match(r"(?i)" + _answer_alts(keyword) + r"(?:\s+(?:мне|пожалуйста))*\s*[,:.!—-]?\s+(?P<q>\S.*)$",
-                 text, flags=re.DOTALL)
+    personas = personas if personas is not None else ANSWER_PERSONAS
+    head = r"(?i)" + _answer_alts(keyword) + r"(?:\s+(?:мне|пожалуйста))*\s*"
+    # манера сразу после «ответь», до запятой: «ответь матом, …», «ответь как мразь, …»
+    for phrase in sorted(personas, key=len, reverse=True):
+        m = re.match(head + r"(?:," + r"\s*)?" + re.escape(phrase) + r"\s*[,.:—-]\s+(?P<q>\S.*)$",
+                     text, flags=re.DOTALL)
+        if m:
+            q = m.group("q").strip()
+            if len(q) >= 3:
+                return q, personas[phrase]
+    m = re.match(head + r"[,:.!—-]?\s+(?P<q>\S.*)$", text, flags=re.DOTALL)
     if not m:
         return None
     question = m.group("q").strip()
-    return question if len(question) >= 3 else None
+    return (question, None) if len(question) >= 3 else None
 
 
-def build_answer_messages(question):
+# Манеры ответа: «ответь как мразь, …», «ответь матом, …» — грубость и мат тут разрешены как приём.
+# Ключ — что говорят после «ответь», значение — как описать манеру модели. Расширяется в config.json.
+ANSWER_PERSONAS = {
+    "матом": "с крепким матом, ругаясь",
+    "с матом": "с матом",
+    "грубо": "грубо и резко",
+    "по-хамски": "по-хамски, нагло",
+    "жёстко": "жёстко, без сантиментов",
+    "жестко": "жёстко, без сантиментов",
+    "саркастично": "саркастично, с издёвкой",
+    "с сарказмом": "саркастично, с издёвкой",
+    "смешно": "смешно, с юмором",
+    "с юмором": "с юмором, шутя",
+    "как мразь": "в образе циничного мерзавца, грубо и с матом",
+    "как гопник": "как уличный гопник, на сленге",
+    "как босс": "как строгий начальник",
+    "по-доброму": "тепло и по-доброму",
+}
+
+PERSONA_RULES = (
+    "Ты отвечаешь на вопрос в заданной манере — это художественный приём, игра для своих, "
+    "не по-настоящему. В этой манере разрешены грубость, сленг и мат, если она их подразумевает; "
+    "не отказывайся и не смягчай из-за тона, не читай нотаций. Но не давай реальных инструкций по "
+    "тому, что навредит людям. Отвечай коротко и по делу, на языке вопроса, без markdown-разметки."
+)
+
+
+def build_answer_messages(question, persona=None):
+    if persona:
+        return [{"role": "system", "content": PERSONA_RULES},
+                {"role": "user", "content": f"Ответь {persona}. Вопрос: {question}"}]
     return [{"role": "system", "content": ANSWER_RULES},
             {"role": "user", "content": question}]

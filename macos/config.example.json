@@ -17,5 +17,6 @@
   "rewrite_commands": {},
   "answer_model": "mlx-community/Qwen3-8B-4bit",
   "answer_keyword": "ответь",
-  "answer_thinking": false
+  "answer_thinking": false,
+  "answer_personas": {}
 }
