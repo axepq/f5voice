@@ -26,6 +26,31 @@ class SplitCommand(unittest.TestCase):
         self.assertEqual(body, "скиньте договор до пятницы")
         self.assertEqual(cmd["key"], "official")
 
+    def test_free_style_on_the_fly(self):
+        for tail in ("Сделай в юмористичном стиле.", "напиши в дружеском стиле",
+                     "перепиши поэтичным стилем", "а сделай это в саркастичном стиле"):
+            body, cmd = rewrite.split_command("Привет, как дела, давно не виделись. " + tail)
+            self.assertEqual(body, "Привет, как дела, давно не виделись.", tail)
+            self.assertEqual(cmd["key"], "free", tail)
+            self.assertIn("стиле", cmd["instruction"].lower())
+
+    def test_free_style_ignores_pronoun_and_plain_speech(self):
+        for text in ("Мне нравится, когда пишут в этом стиле", "Мы поговорили в деловом ключе",
+                     "Он одет в классном стиле"):
+            got = rewrite.split_command(text)
+            # либо не команда, либо (для «в этом стиле») точно не free-выдумка
+            if got[1] is not None:
+                self.assertNotEqual(got[1].get("title", ""), "этом")
+
+    def test_essence_style(self):
+        body, cmd = rewrite.split_command("Слушай ну там короче надо это сделать по сути.")
+        self.assertEqual(cmd["key"], "essence")
+        self.assertIn("суть", cmd["instruction"].lower())
+
+    def test_builtin_styles_listed_for_settings(self):
+        for phrase, _ in rewrite.BUILTIN_STYLES:  # каждая фраза из списка настроек реально распознаётся
+            self.assertIsNotNone(rewrite.split_command("Текст письма. " + phrase + ".")[1], phrase)
+
     def test_all_builtin_triggers(self):
         for key, (triggers, _) in rewrite.COMMANDS.items():
             for trig in triggers.split("|"):

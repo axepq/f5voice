@@ -294,8 +294,24 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         tryStyle.toolTip = "Переписать последний надиктованный текст выбранным в таблице стилем; ничего не выбрано — официальным"
         let stylesBar = NSStackView(views: [addStyle, removeStyle, tryStyle])
         stylesBar.spacing = 8
+
+        // Встроенные стили — только для показа: видно, какие фразы уже работают.
+        let builtinTitle = label("Готовые стили — скажите фразу в конце диктовки")
+        builtinTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        var builtinRows: [[NSView]] = []
+        for item in builtinStyleList {
+            let phrase = NSTextField(labelWithString: "«\(item.phrase)»")
+            let summary = NSTextField(labelWithString: item.summary)
+            summary.textColor = .secondaryLabelColor
+            builtinRows.append([phrase, summary])
+        }
+        let builtinGrid = NSGridView(views: builtinRows)
+        builtinGrid.rowSpacing = 4
+        builtinGrid.columnSpacing = 16
+        builtinGrid.column(at: 0).xPlacement = .leading
+
         let stylesHint = NSTextField(wrappingLabelWithString:
-            "Встроенные: \(builtinStyles). Свой стиль с той же фразой заменяет встроенный. Правки применяются сразу.")
+            "Свои стили ниже: своя фраза с тем же названием заменяет готовую. Правки применяются сразу.")
         stylesHint.font = .systemFont(ofSize: 11)
         stylesHint.textColor = .tertiaryLabelColor
         stylesHint.preferredMaxLayoutWidth = 512
@@ -348,7 +364,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         hint.preferredMaxLayoutWidth = 512
 
         let root = NSStackView(views: [header, separator(), form,
-                                       separator(), section("Переписывание и ответы"), aiForm, stylesTitle, stylesScroll, stylesBar, stylesHint,
+                                       separator(), section("Переписывание и ответы"), aiForm,
+                                       builtinTitle, builtinGrid, stylesTitle, stylesScroll, stylesBar, stylesHint,
                                        separator(), section("Последние диктовки"), scroll, historyBar,
                                        separator(), section("Разрешения"), perms, separator(), bar, hint])
         root.orientation = .vertical
