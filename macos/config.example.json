@@ -15,7 +15,7 @@
   "rewrite_idle_minutes": 1,
   "rewrite_keyword": "команда",
   "rewrite_commands": {},
-  "answer_model": "mlx-community/Qwen3-8B-4bit",
+  "answer_model": "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
   "answer_keyword": "ответь",
   "answer_thinking": false,
   "answer_personas": {}

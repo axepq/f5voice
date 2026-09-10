@@ -38,8 +38,9 @@ let whisperModels = [
 ]
 /// Модели для переписывания и ответов: (репозиторий, подпись в настройках).
 let rewriteModels = [
-    ("mlx-community/Qwen3-4B-Instruct-2507-4bit", "Qwen3 4B — быстрая, 3 ГБ памяти"),
-    ("mlx-community/Qwen3-8B-4bit", "Qwen3 8B — точнее, 5 ГБ памяти"),
+    ("mlx-community/Qwen3-4B-Instruct-2507-4bit", "Qwen3 4B — быстрая, 3 ГБ (переписывание)"),
+    ("mlx-community/Qwen3-8B-4bit", "Qwen3 8B — точнее, 5 ГБ"),
+    ("mlx-community/Mistral-Nemo-Instruct-2407-4bit", "Mistral Nemo 12B — живая и вольная, 7 ГБ (ответы)"),
 ]
 /// Встроенные стили переписывания для окна настроек (фраза, что делает). Дублирует BUILTIN_STYLES в common/rewrite.py.
 let builtinStyleList: [(phrase: String, summary: String)] = [
@@ -81,7 +82,7 @@ struct Config {
     var rewriteIdleMinutes = 1.0
     var rewriteKeyword = "команда"
     var rewriteCommands: [(triggers: String, instruction: String)] = []  // свои стили, порядок как в файле
-    var answerModel = rewriteModels[1].0    // "" — выключено
+    var answerModel = rewriteModels[2].0    // "" — выключено
     var answerKeyword = "ответь"
     var answerThinking = false
     var loadError: String?

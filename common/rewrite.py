@@ -12,7 +12,7 @@ import re
 DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 DEFAULT_KEYWORD = "команда"
 DEFAULT_IDLE_MINUTES = 1
-ANSWER_MODEL = "mlx-community/Qwen3-8B-4bit"   # ответы на вопросы: тут важнее знания, размер решает
+ANSWER_MODEL = "mlx-community/Mistral-Nemo-Instruct-2407-4bit"   # ответы: живее в языке, вольнее в тоне, хороший русский
 ANSWER_KEYWORD = "ответь"
 
 # ключ → (триггеры через «|», инструкция модели). Триггер — то, что говорят в конце фразы.

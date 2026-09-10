@@ -120,7 +120,7 @@ PY
 
 # Модели для переписывания и ответов: качаются здесь, чтобы первая команда не ждала минуты.
 # "" в config.json — функция выключена, модель не нужна.
-for pair in "rewrite_model|mlx-community/Qwen3-4B-Instruct-2507-4bit|переписывания|2,5" "answer_model|mlx-community/Qwen3-8B-4bit|ответов|4,5"; do
+for pair in "rewrite_model|mlx-community/Qwen3-4B-Instruct-2507-4bit|переписывания|2,5" "answer_model|mlx-community/Mistral-Nemo-Instruct-2407-4bit|ответов|6,5"; do
     IFS='|' read -r key default what size <<<"$pair"
     LLM="$("$HOME_DIR/venv/bin/python" -c "import json;c=json.load(open('$HOME_DIR/config.json'));print(c.get('$key','$default'))")"
     [[ -n "$LLM" ]] || continue
