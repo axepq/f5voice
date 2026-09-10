@@ -622,6 +622,8 @@ class HUD(threading.Thread):
     }
     TICK_MS = 33          # 30 кадров в секунду
     GLINT_SECONDS = 5.0   # один оборот блика по кольцу
+    KEY = "#141516"       # «прозрачный» цвет окна на Windows: снаружи капсулы и под стеклом DWM
+    SS = 3                # суперсэмплинг: холст tkinter не сглаживает, рисуем через Pillow втрое крупнее
     ALPHA = 0.94          # непрозрачность плашки; появление и уход — плавным затуханием
 
     def __init__(self, app, level_fn, style="glass"):
@@ -661,8 +663,8 @@ class HUD(threading.Thread):
         try:
             root.update_idletasks()
             if self.style == "metal":
-                root.attributes("-transparentcolor", "#010203")
-                self.canvas.configure(bg="#010203")
+                root.attributes("-transparentcolor", self.KEY)
+                self.canvas.configure(bg=self.KEY)
                 self.cutout = True
                 return
             hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
@@ -674,8 +676,8 @@ class HUD(threading.Thread):
                 dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)
                 backdrop = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW — акрил
                 if dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(backdrop), 4) == 0:
-                    root.attributes("-transparentcolor", "#010203")
-                    self.canvas.configure(bg="#010203")
+                    root.attributes("-transparentcolor", self.KEY)
+                    self.canvas.configure(bg=self.KEY)
                     self.glass = True
         except Exception as e:  # noqa: BLE001
             log(f"стекло DWM недоступно ({e}) — обычная панель")
@@ -707,6 +709,11 @@ class HUD(threading.Thread):
             root.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 80}")
             self.root = root
             self.tk = tk
+            try:  # сглаженная отрисовка через Pillow; без него — обычный холст
+                from PIL import Image, ImageDraw, ImageTk
+                self.pil = (Image, ImageDraw, ImageTk)
+            except ImportError:
+                self.pil = None
             self._apply_windows_glass(root)
             root.after(self.TICK_MS, self._tick)
             root.mainloop()
@@ -814,7 +821,73 @@ class HUD(threading.Thread):
             v = int(base + (255 - base) * k)
             c.create_line(x0, y0, x1, y1, fill=f"#{v:02x}{v:02x}{min(255, v + 4):02x}", width=width, capstyle="round")
 
+    def _bars(self):
+        """Столбики уровня для текущего кадра: (x, высота, доля яркости) в координатах плашки."""
+        out = []
+        x = 46
+        if self.state == "recording":
+            self.level += (float(self.level_fn() or 0.0) - self.level) * 0.5
+            self.scroll += 2.0
+            if self.scroll >= 6.0:
+                self.scroll -= 6.0
+                self.hist.append(max(0.0, min(1.0, self.level)))
+            f = self.scroll / 6.0
+            for i in range(11):
+                fade = 1.0 - f if i == 0 else (f if i == 10 else 1.0)
+                out.append((x + i * 6 - self.scroll, 3 + 20 * self.hist[i], fade))
+        elif self.state == "transcribing":
+            for i in range(10):
+                v = 0.5 + 0.5 * math.sin(self.phase - i * 0.65)
+                out.append((x + i * 6, 3 + 20 * v, 1.0))
+        return out
+
+    def _draw_pil(self):
+        """Кадр через Pillow: рисуем в SS раз крупнее и уменьшаем с фильтром — края гладкие."""
+        Image, ImageDraw, ImageTk = self.pil
+        S = self.SS
+        W, H = self.W * S, self.H * S
+        img = Image.new("RGB", (W, H), self.KEY if (self.cutout or self.glass) else self.bg)
+        d = ImageDraw.Draw(img)
+        self.phase += 0.18
+        color = self.COLORS.get(self.state, "#ffffff")
+        cy = H / 2
+        if self.style == "metal":
+            if self.cutout:
+                d.rounded_rectangle((S, S, W - S, H - S), radius=(H - 2 * S) / 2, fill=self.bg)
+            pts = self._pill_points(96, 2.5)
+            n = len(pts) - 1
+            self.glint = (self.glint + self.TICK_MS / 1000.0 / self.GLINT_SECONDS) % 1.0
+            w = 3 * S
+            for i in range(n):
+                (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+                base = 160 - 95 * ((y0 + y1) / 2 / self.H)
+                dist = (self.glint - i / n) % 1.0
+                if dist < 0.22:
+                    k = (1.0 - dist / 0.22) ** 2
+                elif dist > 1.0 - 0.06:
+                    k = (1.0 - (1.0 - dist) / 0.06) ** 2
+                else:
+                    k = 0.0
+                v = int(base + (255 - base) * k)
+                col = (v, v, min(255, v + 4))
+                d.line((x0 * S, y0 * S, x1 * S, y1 * S), fill=col, width=w)
+                d.ellipse((x0 * S - w / 2, y0 * S - w / 2, x0 * S + w / 2, y0 * S + w / 2), fill=col)
+        r = (7 + 2.5 * (0.5 + 0.5 * math.sin(self.phase * 0.6))) * S if self.state == "recording" else 7 * S
+        d.ellipse((22 * S - r, cy - r, 22 * S + r, cy + r), fill=color)
+        bars = self._bars()
+        for bx, h, fade in bars:
+            d.rounded_rectangle((bx * S, cy - h * S / 2, (bx + 3) * S, cy + h * S / 2), radius=1.5 * S,
+                                fill=self._blend(self.fg, self.bg, fade))
+        img = img.resize((self.W, self.H), Image.LANCZOS)
+        self._photo = ImageTk.PhotoImage(img)
+        c = self.canvas
+        c.delete("all")
+        c.create_image(0, 0, anchor="nw", image=self._photo)
+        c.create_text(46 + 70 if bars else 46, self.H / 2, text=self.text, anchor="w", fill=self.fg, font=("Segoe UI", 12))
+
     def _draw(self):
+        if self.pil:
+            return self._draw_pil()
         c = self.canvas
         c.delete("all")
         self.phase += 0.18
