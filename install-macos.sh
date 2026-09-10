@@ -118,7 +118,7 @@ from huggingface_hub import snapshot_download
 snapshot_download(sys.argv[1])
 PY
 
-RW_MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;c=json.load(open('$HOME_DIR/config.json'));print(c.get('rewrite_model','mlx-community/Qwen3-4B-4bit'))")"
+RW_MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;c=json.load(open('$HOME_DIR/config.json'));print(c.get('rewrite_model','mlx-community/Qwen3-4B-Instruct-2507-4bit'))")"
 if [[ -n "$RW_MODEL" ]]; then
     step "Модель для переписывания $RW_MODEL (первый раз около 2,5 ГБ)"
     "$HOME_DIR/venv/bin/python" - "$RW_MODEL" <<'PY' || fail "не удалось скачать модель $RW_MODEL — проверь интернет; выключить переписывание: \"rewrite_model\": \"\" в $HOME_DIR/config.json"

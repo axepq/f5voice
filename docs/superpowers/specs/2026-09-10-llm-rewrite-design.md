@@ -48,7 +48,7 @@ Windows/Linux эту функцию не получают; общий код в 
 Настройки в `~/.f5voice/config.json`, все необязательные:
 
 ```json
-"rewrite_model": "mlx-community/Qwen3-4B-4bit",
+"rewrite_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
 "rewrite_idle_minutes": 1,
 "rewrite_keyword": "команда",
 "rewrite_commands": {"вежливо|повежливее": "Перепиши вежливо, сохранив смысл."}

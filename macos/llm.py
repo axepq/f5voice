@@ -55,15 +55,17 @@ class Rewriter:
 
     def rewrite(self, model, messages, idle_sec, max_tokens=None):
         from mlx_lm import generate
+        from mlx_lm.sample_utils import make_logits_processors
 
         self.idle_sec = float(idle_sec)
         if self.model_name != model:
             self._load(model)
         self.last_use = time.time()
         prompt = self.tok.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)
-        if max_tokens is None:
-            max_tokens = 2 * len(self.tok.encode(messages[-1]["content"])) + 64
-        text = generate(self.model, self.tok, prompt=prompt, max_tokens=max_tokens, verbose=False)
+        if max_tokens is None:  # ответ не длиннее удвоенного исходника; потолок — чтобы зацикливание не длилось минуты
+            max_tokens = min(2 * len(self.tok.encode(messages[-1]["content"])) + 64, 700)
+        text = generate(self.model, self.tok, prompt=prompt, max_tokens=max_tokens, verbose=False,
+                        logits_processors=make_logits_processors(repetition_penalty=1.1))
         self.last_use = time.time()
         return text
 

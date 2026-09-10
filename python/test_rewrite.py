@@ -86,15 +86,16 @@ class BuildMessages(unittest.TestCase):
         _, cmd = rewrite.split_command("Текст. Официально.")
         msgs = rewrite.build_messages("Текст.", cmd)
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
-        self.assertIn("Верни только", msgs[0]["content"])
+        self.assertIn("только переписанный", msgs[0]["content"])
         self.assertIn("длинного тире", msgs[0]["content"])
-        self.assertIn(cmd["instruction"], msgs[0]["content"])
-        self.assertEqual(msgs[1]["content"], "Текст.")
+        self.assertIn("Пример.", msgs[0]["content"])
+        self.assertIn(cmd["instruction"], msgs[1]["content"])
+        self.assertIn("Текст: Текст.", msgs[1]["content"])
 
     def test_free_instruction_goes_as_task(self):
         _, cmd = rewrite.split_command("Текст. Команда: сделай списком.")
         msgs = rewrite.build_messages("Текст.", cmd)
-        self.assertIn("сделай списком", msgs[0]["content"])
+        self.assertIn("сделай списком", msgs[1]["content"])
 
 
 class Humanize(unittest.TestCase):
@@ -138,6 +139,13 @@ class Accept(unittest.TestCase):
     def test_short_ok_for_shorter_and_free(self):
         self.assertTrue(rewrite.accept(self.original, "Поправьте цифру в договоре.", self.shorter))
         self.assertTrue(rewrite.accept(self.original, "Поправьте.", self.free))
+
+    def test_commentary_instead_of_rewrite_rejected(self):
+        for bad in ("В тексте присутствуют разговорные выражения, которые не соответствуют требованиям стиля.",
+                    "Извините, я не могу переписать этот текст.",
+                    "Текст должен быть переписан в нейтральном стиле без разговорных слов и восклицаний."):
+            self.assertFalse(rewrite.accept(self.original, bad, self.official), bad)
+            self.assertFalse(rewrite.accept(self.original, bad, self.free), bad)
 
     def test_normal_accepted(self):
         self.assertTrue(rewrite.accept(self.original, "Добрый день. Прошу исправить сумму в договоре.",
