@@ -189,6 +189,14 @@ class SplitAnswer(unittest.TestCase):
         self.assertEqual(rewrite.split_answer("ответь мне пожалуйста, что такое DNS"), "что такое DNS")
         self.assertEqual(rewrite.split_answer("Ответь что такое DNS."), "что такое DNS.")
 
+    def test_whisper_drops_soft_sign(self):
+        # Whisper часто теряет мягкий знак: «Ответь» → «Ответ»
+        for start in ("Ответ,", "Ответ"):
+            q = rewrite.split_answer(start + " как находить человека по IP")
+            self.assertEqual(q, "как находить человека по IP", start)
+        # но «Ответьте на письмо» — диктовка человеку, не вопрос
+        self.assertIsNone(rewrite.split_answer("Ответьте на письмо до пятницы"))
+
     def test_keyword_alone_or_inside_is_plain(self):
         for text in ("Ответь.", "Ответь", "Я жду, ответь мне.", "Ответьте на письмо до пятницы", "отвечу завтра"):
             self.assertIsNone(rewrite.split_answer(text), text)
