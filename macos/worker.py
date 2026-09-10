@@ -16,7 +16,13 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
 Протокол:
   <- {"ready": true, "load_sec": 2.5}
   -> /Users/alex/.f5voice/last.wav
+  -> (пустая строка)                                          пинг: не выгружать модель, идёт запись
+  -> {"rewrite": {"text": "…", "trigger": "официальный стиль"}} переписать готовый текст (кнопка «Проверить»)
+  <- {"status": "download", "command": "mlx-community/…"}     качаю модель переписывания/ответов, один раз
   <- {"status": "rewrite", "command": "официальный стиль"}   только если в хвосте команда
+  <- {"status": "answer", "command": "что такое DNS"}         фраза начиналась с «ответь»
+  <- {"text": "", "question": "что такое DNS", "answer": "…", "answer_sec": 6.1}
+  <- {"text": "", "question": "…", "answer_error": "…"}
   <- {"text": "Привет", "lang": "ru", "scores": {"ru": 0.99, "en": 0.01}, "fixed": 0, "dur": 2.1, "sec": 0.8,
       "rewrite": "official", "rewrite_sec": 3.2}            rewrite_* — только при команде
   <- {"text": "…исходник без команды…", "rewrite": "official", "rewrite_error": "…"}
@@ -24,8 +30,9 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
   <- {"text": "", "error": "..."}            не смог прочитать файл и т.п.
 
 Настройки переписывания (rewrite_model, rewrite_idle_minutes, rewrite_keyword, rewrite_commands)
-воркер читает из ~/.f5voice/config.json сам, при каждом запросе — правки без перезапуска.
-"rewrite_model": "" выключает переписывание.
+и ответов (answer_model, answer_keyword, answer_thinking) воркер читает из ~/.f5voice/config.json
+сам, при каждом запросе — правки без перезапуска. "rewrite_model": "" выключает переписывание,
+"answer_model": "" — ответы.
 """
 import glob
 import json
@@ -93,9 +100,36 @@ def rewrite_settings():
     except (TypeError, ValueError):
         idle_sec = rewrite.DEFAULT_IDLE_MINUTES * 60
     keyword = cfg.get("rewrite_keyword", rewrite.DEFAULT_KEYWORD)
+    answer_model = cfg.get("answer_model", rewrite.ANSWER_MODEL)
+    answer_keyword = cfg.get("answer_keyword", rewrite.ANSWER_KEYWORD)
     return {"model": model if isinstance(model, str) else "", "idle_sec": idle_sec,
             "keyword": keyword.strip() if isinstance(keyword, str) else "",
-            "commands": rewrite.merge_commands(cfg.get("rewrite_commands"))}
+            "commands": rewrite.merge_commands(cfg.get("rewrite_commands")),
+            "answer_model": answer_model if isinstance(answer_model, str) else "",
+            "answer_keyword": answer_keyword.strip() if isinstance(answer_keyword, str) else "",
+            "answer_thinking": bool(cfg.get("answer_thinking", False))}
+
+
+def on_download(name):
+    out({"status": "download", "command": name})
+    log(f"скачиваю модель {name} — это один раз")
+
+
+def do_rewrite(llm, rw, body, cmd):
+    """(текст для вставки, поля ответа). При любой ошибке — исходник без команды и rewrite_error."""
+    out({"status": "rewrite", "command": cmd["title"]})
+    log(f"переписываю ({cmd['key']}: {cmd['title']}) ← {body[:300]}")
+    t2 = time.time()
+    try:
+        raw = llm.rewrite(rw["model"], rewrite.build_messages(body, cmd), rw["idle_sec"], on_download=on_download)
+        result = rewrite.humanize(raw)
+        log(f"модель ответила за {time.time() - t2:.1f} с → {result[:300]}")
+        if not rewrite.accept(body, result, cmd):
+            raise ValueError("ответ модели пустой, слишком короткий или это рассуждение вместо текста")
+        return result, {"rewrite": cmd["key"], "rewrite_sec": round(time.time() - t2, 2)}
+    except Exception as e:  # noqa: BLE001 — текст терять нельзя, вставляем исходник
+        log(f"! переписать не вышло: {type(e).__name__}: {e}")
+        return body, {"rewrite": cmd["key"], "rewrite_error": f"{type(e).__name__}: {e}"}
 
 
 def main():
@@ -189,9 +223,29 @@ def main():
         if not line:  # EOF — приложение закрылось
             return
         path = line.strip()
-        if not path:
-            continue
         last_use = t1 = time.time()
+        if not path:  # пинг: приложение начало запись, модель нужна живой
+            if llm.loaded:
+                llm.last_use = last_use
+            continue
+        if path.startswith("{"):  # команда без звука
+            try:
+                req = json.loads(path)
+                rw = rewrite_settings()
+                if "rewrite" in req:
+                    body = str(req["rewrite"].get("text") or "").strip()
+                    trigger = str(req["rewrite"].get("trigger") or "официальный стиль")
+                    _, cmd = rewrite.split_command("x. " + trigger, rw["commands"], rw["keyword"])
+                    if not body or not cmd:
+                        out({"text": "", "error": "нечего переписывать или неизвестный стиль"})
+                        continue
+                    text, extra = do_rewrite(llm, rw, body, cmd)
+                    out({"text": text, "sec": round(time.time() - t1, 2), **extra})
+                else:
+                    out({"text": "", "error": "неизвестная команда"})
+            except Exception as e:  # noqa: BLE001
+                out({"text": "", "error": f"{type(e).__name__}: {e}"})
+            continue
         try:
             try:
                 audio = load_audio(path)
@@ -205,22 +259,28 @@ def main():
             text, lang, scores, fixed = recognize(audio)
             extra = {}
             rw = rewrite_settings()
-            body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if rw["model"] else (text, None)
-            if cmd:
-                out({"status": "rewrite", "command": cmd["title"]})
-                log(f"переписываю ({cmd['key']}: {cmd['title']}) ← {body[:300]}")
+            question = rewrite.split_answer(text, rw["answer_keyword"]) if rw["answer_model"] else None
+            if question:  # «ответь, …» — вопрос модели, в текст ничего не вставляется
+                out({"status": "answer", "command": question[:60]})
+                log(f"отвечаю ← {question[:300]}")
                 t2 = time.time()
                 try:
-                    raw = llm.rewrite(rw["model"], rewrite.build_messages(body, cmd), rw["idle_sec"])
-                    result = rewrite.humanize(raw)
-                    log(f"модель ответила за {time.time() - t2:.1f} с → {result[:300]}")
-                    if not rewrite.accept(body, result, cmd):
-                        raise ValueError("ответ модели пустой или слишком короткий")
-                    text = result
-                    extra = {"rewrite": cmd["key"], "rewrite_sec": round(time.time() - t2, 2)}
-                except Exception as e:  # noqa: BLE001 — текст терять нельзя, вставляем исходник
-                    text = body
-                    extra = {"rewrite": cmd["key"], "rewrite_error": f"{type(e).__name__}: {e}"}
+                    raw = llm.rewrite(rw["answer_model"], rewrite.build_answer_messages(question), rw["idle_sec"],
+                                      max_tokens=1500, thinking=rw["answer_thinking"], on_download=on_download)
+                    answer = rewrite.humanize(raw)
+                    if not answer:
+                        raise ValueError("модель ничего не ответила")
+                    log(f"ответ за {time.time() - t2:.1f} с → {answer[:300]}")
+                    history.add(HOME_DIR / "history.json", f"Вопрос: {question}\nОтвет: {answer}", lang, time.time() - t1)
+                    out({"text": "", "question": question, "answer": answer, "answer_sec": round(time.time() - t2, 2),
+                         "sec": round(time.time() - t1, 2)})
+                except Exception as e:  # noqa: BLE001
+                    out({"text": "", "question": question, "answer_error": f"{type(e).__name__}: {e}"})
+                last_use = time.time()
+                continue
+            body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if rw["model"] else (text, None)
+            if cmd:
+                text, extra = do_rewrite(llm, rw, body, cmd)
                 last_use = time.time()
             history.add(HOME_DIR / "history.json", text, lang, time.time() - t1)
             out({"text": text, "lang": lang, "scores": scores, "fixed": fixed,

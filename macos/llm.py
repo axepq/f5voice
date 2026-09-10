@@ -28,12 +28,14 @@ class Rewriter:
             return 0.0
         return max(0.0, self.idle_sec - (time.time() - self.last_use))
 
-    def _load(self, name):
+    def _load(self, name, on_download=None):
         import mlx.core as mx
         from mlx_lm import load
 
         self.unload()
         t0 = time.time()
+        if not _cached(name) and on_download:
+            on_download(name)  # приложение покажет «скачиваю модель» и не сочтёт воркер зависшим
         # Воркер выставляет HF_HUB_OFFLINE=1 ради Whisper, а huggingface_hub читает его один раз при импорте:
         # новую модель переписывания иначе никогда не скачать. Переключаем флаг только на время загрузки.
         from huggingface_hub import constants as hf
@@ -59,17 +61,21 @@ class Rewriter:
         self.log(f"модель переписывания {self.model_name} выгружена")
         self.model_name = None
 
-    def rewrite(self, model, messages, idle_sec, max_tokens=None):
+    def rewrite(self, model, messages, idle_sec, max_tokens=None, thinking=False, on_download=None):
+        """Ответ модели на messages. thinking — режим размышлений Qwen3 (медленнее, точнее на задачах
+        с расчётом); блок <think> из ответа снимает rewrite.humanize."""
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_logits_processors
 
         self.idle_sec = float(idle_sec)
         if self.model_name != model:
-            self._load(model)
+            self._load(model, on_download)
         self.last_use = time.time()
-        prompt = self.tok.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)
+        prompt = self.tok.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=thinking)
         if max_tokens is None:  # ответ не длиннее утроенного исходника; потолок — чтобы зацикливание не длилось минуты
             max_tokens = min(3 * len(self.tok.encode(messages[-1]["content"])) + 128, 2500)
+            if thinking:
+                max_tokens += 3000  # размышления съедают токены до ответа
         chunks, finish = [], None
         for r in stream_generate(self.model, self.tok, prompt=prompt, max_tokens=max_tokens,
                                  logits_processors=make_logits_processors(repetition_penalty=1.1)):

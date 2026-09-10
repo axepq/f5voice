@@ -180,5 +180,29 @@ class Accept(unittest.TestCase):
                                        self.official))
 
 
+class SplitAnswer(unittest.TestCase):
+    """«Ответь» в начале фразы — вопрос модели; в середине или без вопроса — обычный текст."""
+
+    def test_question_after_keyword(self):
+        self.assertEqual(rewrite.split_answer("Ответь, сколько километров от Москвы до Питера?"),
+                         "сколько километров от Москвы до Питера?")
+        self.assertEqual(rewrite.split_answer("ответь мне пожалуйста, что такое DNS"), "что такое DNS")
+        self.assertEqual(rewrite.split_answer("Ответь что такое DNS."), "что такое DNS.")
+
+    def test_keyword_alone_or_inside_is_plain(self):
+        for text in ("Ответь.", "Ответь", "Я жду, ответь мне.", "Ответьте на письмо до пятницы", "отвечу завтра"):
+            self.assertIsNone(rewrite.split_answer(text), text)
+
+    def test_custom_keyword(self):
+        self.assertEqual(rewrite.split_answer("Вопрос: что такое DNS", keyword="вопрос"), "что такое DNS")
+        self.assertIsNone(rewrite.split_answer("Ответь, что такое DNS", keyword="вопрос"))
+
+    def test_answer_messages(self):
+        msgs = rewrite.build_answer_messages("что такое DNS")
+        self.assertEqual([m["role"] for m in msgs], ["system", "user"])
+        self.assertIn("длинного тире", msgs[0]["content"])
+        self.assertEqual(msgs[1]["content"], "что такое DNS")
+
+
 if __name__ == "__main__":
     unittest.main()

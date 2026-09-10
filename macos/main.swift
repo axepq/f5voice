@@ -31,6 +31,13 @@ let launchdLabel = "com.alex.f5voice"
 let cancelCode: Int64 = 53                 // Esc
 let spareKeyCode: CGKeyCode = 64           // F17: сюда hidutil переводит выбранную F-клавишу
 let typeQueue = DispatchQueue(label: "f5voice.type", qos: .userInteractive)
+/// Модели для переписывания и ответов: (репозиторий, подпись в настройках).
+let rewriteModels = [
+    ("mlx-community/Qwen3-4B-Instruct-2507-4bit", "Qwen3 4B — быстрая, 3 ГБ памяти"),
+    ("mlx-community/Qwen3-8B-4bit", "Qwen3 8B — точнее, 5 ГБ памяти"),
+]
+/// Встроенные стили переписывания (дублирует COMMANDS в common/rewrite.py — для подсказки в настройках).
+let builtinStyles = "официальный стиль · короче · исправь ошибки · по-английски · улучши подачу · технический стиль · команда: своя инструкция"
 let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клавиатуры
 let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
 let rewriteTimeoutSeconds: Double = 120     // переписывание моделью: загрузка + генерация длинного текста
@@ -55,6 +62,14 @@ struct Config {
     var newlineElsewhere = "shift"
     var style = "glass"                 // glass | metal | clear | dark
     var recordMode = "auto"             // auto — нажатие или удержание | toggle — только нажатие | hold — только удержание
+    // Переписывание по команде и ответы на вопросы: читает воркер из config.json сам, здесь — для окна настроек.
+    var rewriteModel = rewriteModels[0].0   // "" — выключено
+    var rewriteIdleMinutes = 1.0
+    var rewriteKeyword = "команда"
+    var rewriteCommands: [(triggers: String, instruction: String)] = []  // свои стили, порядок как в файле
+    var answerModel = rewriteModels[1].0    // "" — выключено
+    var answerKeyword = "ответь"
+    var answerThinking = false
     var loadError: String?
 
     /// Дописывает ключи в config.json, остальное сохраняя как есть.
@@ -99,6 +114,15 @@ struct Config {
         if let v = obj["newline_elsewhere"] as? String { c.newlineElsewhere = v }
         if let v = obj["style"] as? String, !v.isEmpty { c.style = v }
         if let v = obj["record_mode"] as? String, ["auto", "toggle", "hold"].contains(v) { c.recordMode = v }
+        if let v = obj["rewrite_model"] as? String { c.rewriteModel = v }
+        if let v = obj["rewrite_idle_minutes"] as? Double { c.rewriteIdleMinutes = v }
+        if let v = obj["rewrite_keyword"] as? String { c.rewriteKeyword = v }
+        if let v = obj["rewrite_commands"] as? [String: String] {
+            c.rewriteCommands = v.keys.sorted().map { (triggers: $0, instruction: v[$0]!) }
+        }
+        if let v = obj["answer_model"] as? String { c.answerModel = v }
+        if let v = obj["answer_keyword"] as? String { c.answerKeyword = v }
+        if let v = obj["answer_thinking"] as? Bool { c.answerThinking = v }
         return c
     }
 
@@ -358,6 +382,9 @@ final class Worker {
         var scores = ""
         var rewrite: String?        // ключ команды переписывания
         var rewriteError: String?   // переписать не вышло — text тогда исходный без команды
+        var question: String?       // фраза начиналась с «ответь»: text пустой, ответ в answer
+        var answer: String?
+        var answerError: String?
     }
 
     var config: Config
@@ -442,11 +469,26 @@ final class Worker {
         p.terminate()
     }
 
-    func transcribe(_ path: String, completion: @escaping (Reply) -> Void) {
+    func transcribe(_ path: String, completion: @escaping (Reply) -> Void) { send(path, completion: completion) }
+
+    /// Переписать готовый текст стилем `trigger` (кнопка «Проверить» в настройках).
+    func rewrite(_ text: String, trigger: String, completion: @escaping (Reply) -> Void) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["rewrite": ["text": text, "trigger": trigger]]),
+              let line = String(data: data, encoding: .utf8) else { return completion(Reply(error: "не собрал запрос")) }
+        send(line, completion: completion)
+    }
+
+    /// Пустая строка воркеру: началась запись, модель переписывания не должна выгрузиться посреди неё.
+    func ping() {
+        guard isReady, pending == nil, let pipe = stdinPipe else { return }
+        try? pipe.fileHandleForWriting.write(contentsOf: "\n".data(using: .utf8)!)
+    }
+
+    private func send(_ line: String, completion: @escaping (Reply) -> Void) {
         if let old = pending {
             old.completion(Reply(error: "вытеснено новым запросом"))
         }
-        pending = (path, false, completion)
+        pending = (line, false, completion)
         start()
         flush()
     }
@@ -498,6 +540,9 @@ final class Worker {
         r.reason = obj["reason"] as? String
         r.rewrite = obj["rewrite"] as? String
         r.rewriteError = obj["rewrite_error"] as? String
+        r.question = obj["question"] as? String
+        r.answer = obj["answer"] as? String
+        r.answerError = obj["answer_error"] as? String
         r.sec = (obj["sec"] as? Double) ?? 0
         r.lang = (obj["lang"] as? String) ?? ""
         if let fixed = obj["fixed"] as? Int, fixed > 0 { r.lang += ", исправлено сегментов: \(fixed)" }
@@ -926,6 +971,7 @@ final class App: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotkeyItem: NSMenuItem!
     private lazy var hud = HUD(style: config.style)
+    private lazy var answerPanel = AnswerPanel()
     private var settings: SettingsWindow?
     private var gate = HoldGate()
     private var holdHint: DispatchWorkItem?
@@ -962,11 +1008,25 @@ final class App: NSObject, NSApplicationDelegate {
             self.armTimeout(transcribeTimeoutSeconds, what: "воркер не ответил")
         }
         worker.onStatus = { [weak self] status, command in
-            guard let self = self, self.state == .transcribing, status == "rewrite" else { return }
-            self.hud.show("Переписываю: \(command)…   Esc — отменить", symbol: "wand.and.stars",
-                          tint: NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1),
-                          bars: .wave, animate: .pulse)
-            self.armTimeout(rewriteTimeoutSeconds, what: "модель переписывания не ответила")
+            guard let self = self, self.state == .transcribing else { return }
+            let violet = NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1)
+            switch status {
+            case "rewrite":
+                self.hud.show("Переписываю: \(command)…   Esc — отменить", symbol: "wand.and.stars", tint: violet,
+                              bars: .wave, animate: .pulse)
+                self.armTimeout(rewriteTimeoutSeconds, what: "модель переписывания не ответила")
+            case "answer":
+                self.hud.show("Отвечаю: \(command)…   Esc — отменить", symbol: "bubble.left.and.text.bubble.right",
+                              tint: violet, bars: .wave, animate: .pulse)
+                self.armTimeout(rewriteTimeoutSeconds * 2, what: "модель не ответила на вопрос")
+            case "download":
+                let name = command.split(separator: "/").last.map(String.init) ?? command
+                self.hud.show("Скачиваю модель \(name), это один раз…   Esc — отменить", symbol: "arrow.down.circle",
+                              tint: violet, bars: .wave, animate: .pulse)
+                self.armTimeout(3600, what: "модель не скачалась")
+            default:
+                break
+            }
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -1061,6 +1121,12 @@ final class App: NSObject, NSApplicationDelegate {
     func apply(_ updates: [String: Any]) {
         Config.save(updates)
         reloadConfig()
+    }
+
+    /// «Проверить» в настройках: переписать текст стилем `trigger`, результат — в completion (на главном потоке).
+    func rewriteSample(_ text: String, trigger: String, completion: @escaping (Worker.Reply) -> Void) {
+        guard state == .idle else { return completion(Worker.Reply(error: "сейчас идёт запись или распознавание")) }
+        worker.rewrite(text, trigger: trigger, completion: completion)
     }
 
     func previewHUD() {
@@ -1334,6 +1400,7 @@ final class App: NSObject, NSApplicationDelegate {
                      symbol: "mic.slash.fill", tint: .systemOrange, hideAfter: 6)
             return
         }
+        worker.ping()
         do {
             try recorder.start(to: lastWav)
         } catch {
@@ -1414,6 +1481,18 @@ final class App: NSObject, NSApplicationDelegate {
             log("ошибка распознавания: \(err)")
             play("Basso")
             hud.show("Ошибка распознавания — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            return
+        }
+        if let q = reply.question {
+            if let a = reply.answer {
+                log("ответ на «\(q.prefix(60))»: \(a.count) символов")
+                hud.hide()
+                answerPanel.show(question: q, answer: a)
+            } else {
+                log("ответить не вышло: \(reply.answerError ?? "?")")
+                play("Basso")
+                hud.show("Не смог ответить — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            }
             return
         }
         if reply.text.isEmpty {
@@ -1531,6 +1610,114 @@ if !others.isEmpty {
 }
 
 let application = NSApplication.shared
+
+// MARK: - Окно ответа («ответь, …»)
+
+/// Esc закрывает панель, откуда бы ни пришло событие (текст в панели не редактируется и Esc не глотает).
+final class EscPanel: NSPanel {
+    override func cancelOperation(_ sender: Any?) { close() }
+}
+
+final class AnswerPanel: NSObject {
+    private let panel: EscPanel
+    private let questionLabel = NSTextField(wrappingLabelWithString: "")
+    private let textView = NSTextView()
+    private let scroll = NSScrollView()
+    private var previousApp: NSRunningApplication?
+    private var answer = ""
+
+    override init() {
+        panel = EscPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 300),
+                         styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
+        super.init()
+        panel.title = "Ответ"
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.minSize = NSSize(width: 380, height: 220)
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+
+        questionLabel.font = .systemFont(ofSize: 12)
+        questionLabel.textColor = .secondaryLabelColor
+        questionLabel.preferredMaxLayoutWidth = 512
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = .systemFont(ofSize: 14)
+        textView.textContainerInset = NSSize(width: 6, height: 8)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+
+        let copy = NSButton(title: "Скопировать", target: self, action: #selector(copyAnswer))
+        let paste = NSButton(title: "Вставить в поле", target: self, action: #selector(pasteAnswer))
+        paste.keyEquivalent = "\r"
+        let close = NSButton(title: "Закрыть", target: self, action: #selector(closePanel))
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [copy, paste, spacer, close])
+        buttons.spacing = 8
+
+        let root = NSStackView(views: [questionLabel, scroll, buttons])
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        root.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView = root
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -40),
+            buttons.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -40),
+            questionLabel.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -40),
+        ])
+    }
+
+    func show(question: String, answer: String) {
+        self.answer = answer
+        previousApp = NSWorkspace.shared.frontmostApplication
+        questionLabel.stringValue = question
+        textView.string = answer
+        // Высота по тексту: от 220 до 60% экрана, дальше прокрутка.
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let width: CGFloat = 560
+        textView.frame.size.width = width - 40 - 12
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        let textHeight = (textView.layoutManager?.usedRect(for: textView.textContainer!).height ?? 100) + 16
+        let height = min(max(textHeight + 120, 220), visible.height * 0.6)
+        let origin = NSPoint(x: visible.midX - width / 2, y: visible.maxY - height - visible.height * 0.12)
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
+        textView.scroll(.zero)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func copyAnswer() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(answer, forType: .string)
+    }
+
+    /// Вернуть фокус туда, где был пользователь, и напечатать ответ, как обычную диктовку.
+    @objc private func pasteAnswer() {
+        let text = answer
+        let cfg = App.shared.config
+        panel.close()
+        previousApp?.activate(options: [])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            typeQueue.async { typeText(text, config: cfg) }
+        }
+    }
+
+    @objc private func closePanel() { panel.close() }
+}
+
 application.setActivationPolicy(.accessory)
 application.delegate = App.shared
 application.run()

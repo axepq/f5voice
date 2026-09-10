@@ -13,6 +13,16 @@ let recordModeNames = [("auto", "Нажатие или удержание"), ("t
 let launchAgentPlist = NSHomeDirectory() + "/Library/LaunchAgents/\(launchdLabel).plist"
 
 /// Служба выключена через launchctl disable: при входе в систему не запустится.
+/// Контейнер с началом координат сверху: прокрутка открывается на шапке, а не на нижнем крае.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Каталог модели в кэше Hugging Face: есть — значит скачана.
+func modelCachePath(_ repo: String) -> String {
+    NSHomeDirectory() + "/.cache/huggingface/hub/models--" + repo.replacingOccurrences(of: "/", with: "--")
+}
+
 func launchAgentDisabled() -> Bool {
     let (code, out) = sh("/bin/launchctl", ["print-disabled", "gui/\(getuid())"])
     guard code == 0 else { return false }
@@ -37,6 +47,17 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let autostartBox = NSButton(checkboxWithTitle: "Запускать при входе в систему", target: nil, action: nil)
     private let micLabel = NSTextField(labelWithString: "")
     private let axLabel = NSTextField(labelWithString: "")
+    // Переписывание и ответы
+    private let rewriteBox = NSButton(checkboxWithTitle: "Переписывать текст по команде в конце фразы", target: nil, action: nil)
+    private let rewriteModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let idleField = NSTextField(string: "")
+    private let keywordField = NSTextField(string: "")
+    private let answerBox = NSButton(checkboxWithTitle: "Отвечать на вопрос, начатый со слова «ответь»", target: nil, action: nil)
+    private let answerModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let thinkingBox = NSButton(checkboxWithTitle: "Подумать перед ответом (точнее, но дольше: 15–40 с)", target: nil, action: nil)
+    private let stylesTable = NSTableView()
+    private var styles: [(triggers: String, instruction: String)] = []
+    private var modelChoices: [String] = []   // репозитории в порядке пунктов popup
     private var hotkeySpecs: [String] = []
     private var timer: Timer?
     private var updating = false
@@ -44,15 +65,35 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     init(app: App) {
         self.app = app
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
-                          styleMask: [.titled, .closable, .miniaturizable],
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         super.init()
         window.title = "F5Voice"
         window.isReleasedWhenClosed = false
         window.delegate = self
+        // Содержимое длиннее экрана ноутбука: кладём в прокрутку, окно не выше видимой области.
         let content = buildContent()
-        window.contentView = content
-        window.setContentSize(content.fittingSize)
+        let holder = FlippedView()
+        holder.translatesAutoresizingMaskIntoConstraints = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(content)
+        let scroll = NSScrollView()
+        scroll.documentView = holder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: holder.topAnchor),
+            content.leadingAnchor.constraint(equalTo: holder.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: holder.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
+            holder.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+        ])
+        window.contentView = scroll
+        let size = content.fittingSize
+        let maxHeight = (NSScreen.main?.visibleFrame.height ?? 800) - 40
+        window.setContentSize(NSSize(width: size.width, height: min(size.height, maxHeight)))
+        window.minSize = NSSize(width: size.width + 20, height: 320)
         window.center()
     }
 
@@ -63,6 +104,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         refresh()
         NSApp.setActivationPolicy(.regular)
         if !window.isVisible { window.center() }
+        (window.contentView as? NSScrollView)?.contentView.scroll(to: .zero)  // всегда с шапки
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)  // без курсора в поле «Языки»: окно открылось, чтобы смотреть, а не печатать
         NSApp.activate(ignoringOtherApps: true)
@@ -185,6 +227,81 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         form.rowAlignment = .firstBaseline
         form.column(at: 0).xPlacement = .trailing
 
+        // Переписывание и ответы
+        rewriteBox.target = self
+        rewriteBox.action = #selector(rewriteToggled)
+        answerBox.target = self
+        answerBox.action = #selector(answerToggled)
+        answerBox.toolTip = "«Ответь, что такое DNS» — ответ появится в отдельном окне, в текст ничего не вставляется"
+        thinkingBox.target = self
+        thinkingBox.action = #selector(thinkingToggled)
+        for popup in [rewriteModelPopup, answerModelPopup] {
+            popup.target = self
+            popup.action = #selector(modelPopupChanged(_:))
+            popup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        }
+        for field in [idleField, keywordField] {
+            field.delegate = self
+            field.target = self
+            field.action = #selector(fieldChanged)
+        }
+        idleField.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        idleField.alignment = .right
+        idleField.toolTip = "Модель занимает память только пока нужна: через столько минут без команд она выгружается"
+        keywordField.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        keywordField.placeholderString = "команда"
+        keywordField.toolTip = "«…текст. Команда: сделай списком» — после этого слова идёт своя инструкция модели"
+        let idleUnit = NSTextField(labelWithString: "мин без команд")
+        idleUnit.textColor = .secondaryLabelColor
+        let idleRow = NSStackView(views: [idleField, idleUnit])
+        idleRow.spacing = 6
+        let aiForm = NSGridView(views: [
+            [NSGridCell.emptyContentView, rewriteBox],
+            [label("Модель"), rewriteModelPopup],
+            [label("Выгружать через"), idleRow],
+            [label("Слово для своей инструкции"), keywordField],
+            [NSGridCell.emptyContentView, answerBox],
+            [label("Модель ответов"), answerModelPopup],
+            [NSGridCell.emptyContentView, thinkingBox],
+        ])
+        aiForm.rowSpacing = 10
+        aiForm.columnSpacing = 12
+        aiForm.rowAlignment = .firstBaseline
+        aiForm.column(at: 0).xPlacement = .trailing
+
+        let triggersCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("triggers"))
+        triggersCol.title = "Сказать в конце фразы (варианты через |)"
+        triggersCol.width = 190
+        let instrCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("instruction"))
+        instrCol.title = "Что сделать с текстом"
+        instrCol.width = 300
+        stylesTable.addTableColumn(triggersCol)
+        stylesTable.addTableColumn(instrCol)
+        stylesTable.rowHeight = 22
+        stylesTable.usesAlternatingRowBackgroundColors = true
+        stylesTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        stylesTable.dataSource = self
+        let stylesScroll = NSScrollView()
+        stylesScroll.documentView = stylesTable
+        stylesScroll.hasVerticalScroller = true
+        stylesScroll.borderType = .bezelBorder
+        stylesScroll.widthAnchor.constraint(equalToConstant: 512).isActive = true
+        stylesScroll.heightAnchor.constraint(equalToConstant: 96).isActive = true
+        let addStyle = NSButton(title: "+", target: self, action: #selector(addStyle))
+        let removeStyle = NSButton(title: "−", target: self, action: #selector(removeStyle))
+        for b in [addStyle, removeStyle] { b.widthAnchor.constraint(equalToConstant: 32).isActive = true }
+        let tryStyle = NSButton(title: "Проверить на последней диктовке", target: self, action: #selector(tryStyle))
+        tryStyle.toolTip = "Переписать последний надиктованный текст выбранным в таблице стилем; ничего не выбрано — официальным"
+        let stylesBar = NSStackView(views: [addStyle, removeStyle, tryStyle])
+        stylesBar.spacing = 8
+        let stylesHint = NSTextField(wrappingLabelWithString:
+            "Встроенные: \(builtinStyles). Свой стиль с той же фразой заменяет встроенный. Правки применяются сразу.")
+        stylesHint.font = .systemFont(ofSize: 11)
+        stylesHint.textColor = .tertiaryLabelColor
+        stylesHint.preferredMaxLayoutWidth = 512
+        let stylesTitle = label("Свои стили")
+        stylesTitle.font = .systemFont(ofSize: 13, weight: .medium)
+
         let micButton = NSButton(title: "Открыть настройки…", target: self, action: #selector(openMic))
         let axButton = NSButton(title: "Открыть настройки…", target: self, action: #selector(openAX))
         let perms = NSGridView(views: [
@@ -230,7 +347,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         hint.textColor = .tertiaryLabelColor
         hint.preferredMaxLayoutWidth = 512
 
-        let root = NSStackView(views: [header, separator(), form, separator(), section("Последние диктовки"), scroll, historyBar,
+        let root = NSStackView(views: [header, separator(), form,
+                                       separator(), section("Переписывание и ответы"), aiForm, stylesTitle, stylesScroll, stylesBar, stylesHint,
+                                       separator(), section("Последние диктовки"), scroll, historyBar,
                                        separator(), section("Разрешения"), perms, separator(), bar, hint])
         root.orientation = .vertical
         root.alignment = .leading
@@ -258,6 +377,25 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         termPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineInTerminals } ?? 0)
         otherPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineElsewhere } ?? 1)
         trailingBox.state = c.trailingSpace ? .on : .off
+        rewriteBox.state = c.rewriteModel.isEmpty ? .off : .on
+        answerBox.state = c.answerModel.isEmpty ? .off : .on
+        thinkingBox.state = c.answerThinking ? .on : .off
+        modelChoices = rewriteModels.map { $0.0 }
+        for extra in [c.rewriteModel, c.answerModel] where !extra.isEmpty && !modelChoices.contains(extra) { modelChoices.append(extra) }
+        for (popup, current) in [(rewriteModelPopup, c.rewriteModel), (answerModelPopup, c.answerModel)] {
+            popup.removeAllItems()
+            for repo in modelChoices { popup.addItem(withTitle: rewriteModels.first { $0.0 == repo }?.1 ?? repo) }
+            popup.selectItem(at: modelChoices.firstIndex(of: current) ?? (popup === rewriteModelPopup ? 0 : 1))
+        }
+        rewriteModelPopup.isEnabled = !c.rewriteModel.isEmpty
+        answerModelPopup.isEnabled = !c.answerModel.isEmpty
+        thinkingBox.isEnabled = !c.answerModel.isEmpty
+        if idleField.currentEditor() == nil { idleField.stringValue = String(Int(c.rewriteIdleMinutes.rounded())) }
+        if keywordField.currentEditor() == nil { keywordField.stringValue = c.rewriteKeyword }
+        if stylesTable.currentEditor() == nil {
+            styles = c.rewriteCommands
+            stylesTable.reloadData()
+        }
         let installed = FileManager.default.fileExists(atPath: launchAgentPlist)
         autostartBox.isEnabled = installed
         autostartBox.state = installed && !launchAgentDisabled() ? .on : .off
@@ -295,14 +433,103 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         historyTable.reloadData()
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { historyItems.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { tableView === stylesTable ? styles.count : historyItems.count }
 
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+        if tableView === stylesTable {
+            guard row < styles.count else { return nil }
+            return tableColumn?.identifier.rawValue == "triggers" ? styles[row].triggers : styles[row].instruction
+        }
         guard row < historyItems.count else { return nil }
         let item = historyItems[row]
         let clock = item.time.count >= 16 ? String(item.time.dropFirst(11).prefix(5)) : ""
         let oneLine = item.text.replacingOccurrences(of: "\n", with: " ")
         return "\(clock)   \(oneLine.prefix(90))"
+    }
+
+    func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
+        guard tableView === stylesTable, row < styles.count else { return }
+        let value = (object as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if tableColumn?.identifier.rawValue == "triggers" { styles[row].triggers = value } else { styles[row].instruction = value }
+        saveStyles()
+    }
+
+    /// Свои стили → rewrite_commands в config.json; строки без фразы или без инструкции не сохраняются.
+    private func saveStyles() {
+        var dict: [String: String] = [:]
+        for s in styles where !s.triggers.isEmpty && !s.instruction.isEmpty { dict[s.triggers] = s.instruction }
+        app.apply(["rewrite_commands": dict])
+    }
+
+    @objc private func addStyle() {
+        styles.append((triggers: "", instruction: ""))
+        stylesTable.reloadData()
+        stylesTable.selectRowIndexes(IndexSet(integer: styles.count - 1), byExtendingSelection: false)
+        stylesTable.editColumn(0, row: styles.count - 1, with: nil, select: true)
+    }
+
+    @objc private func removeStyle() {
+        let row = stylesTable.selectedRow
+        guard row >= 0, row < styles.count else { return }
+        styles.remove(at: row)
+        stylesTable.reloadData()
+        saveStyles()
+    }
+
+    @objc private func tryStyle() {
+        guard let sample = historyItems.first(where: { !$0.text.hasPrefix("Вопрос:") })?.text else {
+            return showResult(title: "Нечего проверять", text: "Сначала продиктуйте что-нибудь: берётся последний текст из истории.")
+        }
+        let row = stylesTable.selectedRow
+        let trigger = row >= 0 && row < styles.count && !styles[row].triggers.isEmpty
+            ? String(styles[row].triggers.split(separator: "|")[0]).trimmingCharacters(in: .whitespaces) : "официальный стиль"
+        guard app.config.rewriteModel.isEmpty == false else {
+            return showResult(title: "Переписывание выключено", text: "Включите галочку «Переписывать текст по команде».")
+        }
+        status.stringValue = "Переписываю стилем «\(trigger)»…"
+        app.rewriteSample(sample, trigger: trigger) { [weak self] reply in
+            guard let self = self else { return }
+            self.refreshStatus()
+            if let err = reply.error ?? reply.rewriteError {
+                self.showResult(title: "Не вышло", text: err)
+            } else {
+                self.showResult(title: "Стиль «\(trigger)»", text: reply.text,
+                                subtitle: String(format: "%.1f с · было: %@", reply.sec, sample))
+            }
+        }
+    }
+
+    private func showResult(title: String, text: String, subtitle: String? = nil) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = subtitle.map { text + "\n\n" + $0 } ?? text
+        alert.addButton(withTitle: "Скопировать")
+        alert.addButton(withTitle: "Закрыть")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+    }
+
+    @objc private func rewriteToggled() {
+        let on = rewriteBox.state == .on
+        app.apply(["rewrite_model": on ? modelChoices[max(rewriteModelPopup.indexOfSelectedItem, 0)] : ""])
+    }
+
+    @objc private func answerToggled() {
+        let on = answerBox.state == .on
+        app.apply(["answer_model": on ? modelChoices[max(answerModelPopup.indexOfSelectedItem, 0)] : ""])
+    }
+
+    @objc private func thinkingToggled() { app.apply(["answer_thinking": thinkingBox.state == .on]) }
+
+    @objc private func modelPopupChanged(_ sender: NSPopUpButton) {
+        guard !updating, sender.indexOfSelectedItem >= 0, sender.indexOfSelectedItem < modelChoices.count else { return }
+        let repo = modelChoices[sender.indexOfSelectedItem]
+        app.apply([sender === rewriteModelPopup ? "rewrite_model" : "answer_model": repo])
+        if !FileManager.default.fileExists(atPath: modelCachePath(repo)) {
+            status.stringValue = "Модель скачается при первой команде (несколько ГБ, один раз)"
+        }
     }
 
     @objc private func copyHistory() {
@@ -346,6 +573,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         let model = modelField.stringValue.trimmingCharacters(in: .whitespaces)
         if !langs.isEmpty, langs != app.config.languages { updates["languages"] = langs }
         if !model.isEmpty, model != app.config.model { updates["model"] = model }
+        if let m = Double(idleField.stringValue.trimmingCharacters(in: .whitespaces)), m >= 0, m != app.config.rewriteIdleMinutes {
+            updates["rewrite_idle_minutes"] = max(m, 0.1)
+        }
+        let kw = keywordField.stringValue.trimmingCharacters(in: .whitespaces)
+        if kw != app.config.rewriteKeyword { updates["rewrite_keyword"] = kw }
         if !updates.isEmpty { app.apply(updates) }
     }
 

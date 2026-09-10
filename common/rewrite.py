@@ -12,6 +12,8 @@ import re
 DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 DEFAULT_KEYWORD = "команда"
 DEFAULT_IDLE_MINUTES = 1
+ANSWER_MODEL = "mlx-community/Qwen3-8B-4bit"   # ответы на вопросы: тут важнее знания, размер решает
+ANSWER_KEYWORD = "ответь"
 
 # ключ → (триггеры через «|», инструкция модели). Триггер — то, что говорят в конце фразы.
 COMMANDS = {
@@ -179,3 +181,31 @@ def accept(original, result, cmd):
     if cmd.get("key") in ("shorter", "free"):
         return True
     return len(result) * 3 >= len((original or "").strip())
+
+
+ANSWER_RULES = (
+    "Ты помощник, отвечаешь на вопрос, заданный голосом. Отвечай по существу и коротко: обычно "
+    "2–6 предложений, длиннее только если вопрос этого требует. Отвечай на языке вопроса. "
+    "Если не знаешь точно, так и скажи, не выдумывай факты и числа. "
+    "Пиши как живой человек: простые предложения, без длинного тире, без заголовков, без эмодзи, "
+    "без штампов вроде «важно отметить», «в современном мире», «данный», «является», без восклицаний "
+    "и без вступлений вроде «отличный вопрос». Списки и переносы строк допустимы, если они реально помогают."
+)
+
+
+def split_answer(text, keyword=ANSWER_KEYWORD):
+    """«Ответь, сколько километров от Москвы до Питера» → вопрос без ключевого слова, иначе None.
+    Ключевое слово — только самое первое слово фразы; «Ответь» без вопроса — обычный текст."""
+    text = (text or "").strip()
+    if not keyword:
+        return None
+    m = re.match(r"(?i)" + re.escape(keyword) + r"(?:\s+(?:мне|пожалуйста))*\s*[,:.!—-]?\s+(?P<q>\S.*)$", text, flags=re.DOTALL)
+    if not m:
+        return None
+    question = m.group("q").strip()
+    return question if len(question) >= 3 else None
+
+
+def build_answer_messages(question):
+    return [{"role": "system", "content": ANSWER_RULES},
+            {"role": "user", "content": question}]
