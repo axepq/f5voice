@@ -32,6 +32,7 @@ let cancelCode: Int64 = 53                 // Esc
 let spareKeyCode: CGKeyCode = 64           // F17: сюда hidutil переводит выбранную F-клавишу
 let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клавиатуры
 let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
+let rewriteTimeoutSeconds: Double = 120     // переписывание моделью: загрузка + генерация длинного текста
 let isService = CommandLine.arguments.contains("--service")  // запущены службой launchd, а не вручную
 let openNote = Notification.Name("com.alex.f5voice.open")       // «покажи окно» от повторного запуска
 let toggleNote = Notification.Name("com.alex.f5voice.toggle")   // F5Voice --toggle: начать/закончить запись
@@ -353,10 +354,13 @@ final class Worker {
         var sec: Double = 0
         var lang = ""
         var scores = ""
+        var rewrite: String?        // ключ команды переписывания
+        var rewriteError: String?   // переписать не вышло — text тогда исходный без команды
     }
 
     var config: Config
     var onReady: (() -> Void)?
+    var onStatus: ((String, String) -> Void)?   // (status, command) — промежуточная строка воркера
     private var process: Process?
     private var stdinPipe: Pipe?
     private var buffer = Data()
@@ -473,10 +477,16 @@ final class Worker {
             return
         }
         if obj["bye"] != nil { return }
+        if let st = obj["status"] as? String {
+            onStatus?(st, (obj["command"] as? String) ?? "")
+            return
+        }
         var r = Reply()
         r.text = (obj["text"] as? String) ?? ""
         r.error = obj["error"] as? String
         r.reason = obj["reason"] as? String
+        r.rewrite = obj["rewrite"] as? String
+        r.rewriteError = obj["rewrite_error"] as? String
         r.sec = (obj["sec"] as? Double) ?? 0
         r.lang = (obj["lang"] as? String) ?? ""
         if let fixed = obj["fixed"] as? Int, fixed > 0 { r.lang += ", исправлено сегментов: \(fixed)" }
@@ -934,6 +944,21 @@ final class App: NSObject, NSApplicationDelegate {
             guard let self = self, self.state == .transcribing else { return }
             self.showTranscribing()
         }
+        worker.onStatus = { [weak self] status, command in
+            guard let self = self, self.state == .transcribing, status == "rewrite" else { return }
+            self.hud.show("Переписываю: \(command)…   Esc — отменить", symbol: "wand.and.stars",
+                          tint: NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1),
+                          bars: .wave, animate: .pulse)
+            self.transcribeTimeout?.cancel()
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self = self, self.state == .transcribing else { return }
+                log("модель переписывания не ответила за \(Int(rewriteTimeoutSeconds)) с — перезапускаю воркер")
+                self.worker.stop(reason: "переписывание зависло и было прервано")
+                self.worker.start()
+            }
+            self.transcribeTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + rewriteTimeoutSeconds, execute: timeout)
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -1376,7 +1401,15 @@ final class App: NSObject, NSApplicationDelegate {
             hud.show("Ничего не услышал", symbol: "mic.slash.fill", hideAfter: 2)
             return
         }
-        hud.hide()
+        if let err = reply.rewriteError {
+            log("переписать не вышло (\(reply.rewrite ?? "?")): \(err) — вставляю исходный текст")
+            play("Basso")
+            hud.show("Не смог переписать, вставляю как сказано", symbol: "exclamationmark.triangle.fill",
+                     tint: .systemOrange, hideAfter: 3)
+        } else {
+            if let key = reply.rewrite { log("переписано (\(key))") }
+            hud.hide()
+        }
         log(String(format: "готово: %d символов, язык %@ (%@), распознавание %.2f с",
                    reply.text.count, reply.lang, reply.scores, reply.sec))
         let endsWithNewline = reply.text.hasSuffix("\n")
