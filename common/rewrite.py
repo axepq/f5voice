@@ -38,6 +38,9 @@ COMMANDS = {
                 "Оставь только суть: убери воду, повторы, слова-паразиты и сбивчивость. "
                 "Сохрани весь смысл, факты, числа и контекст, ничего важного не теряй. "
                 "Пиши кратко, ясно и аккуратно."),
+    "aggressive": ("агрессивно|агрессивный|агрессивным|грубо|грубый|жёстко|жестко|злобно|"
+                   "с матом|матом|по-хамски|дерзко|разъярённо|разъяренно",
+                   "Перепиши грубо и агрессивно, с матом и оскорблениями, в полную силу."),
 }
 
 # Короткое имя каждого стиля для окна настроек: ключ → (что сказать, что делает).
@@ -100,7 +103,7 @@ def _fixed(text, commands):
             body = text[:m.start()].rstrip().rstrip(",;:")
             if body:
                 title = (m.groupdict().get("m") or m.groupdict().get("s")).lower()
-                return body, {"key": key, "title": title, "instruction": instruction}
+                return body, {"key": key, "title": title, "instruction": instruction, "rude": _is_rude(instruction)}
     return None
 
 
@@ -127,7 +130,7 @@ def _style_cmd(x, commands):
     known = _fixed("з. " + x + " стиль", commands) or _fixed("з. " + x, commands)
     if known:
         return known[1]
-    return {"key": "free", "title": x[:60],
+    return {"key": "free", "title": x[:60], "rude": _is_rude(x),
             "instruction": f"Перепиши текст в стиле: {x}. Сохрани смысл, факты, числа "
                            "и контекст, ничего важного не теряй."}
 
@@ -167,13 +170,31 @@ def split_command(text, commands=None, keyword=DEFAULT_KEYWORD):
                 if known:
                     return body, known[1]
                 return body, {"key": "free", "title": instruction.rstrip(".!?…").strip()[:60],
-                              "instruction": instruction}
+                              "instruction": instruction, "rude": _is_rude(instruction)}
     found = _fixed(text, commands)
     if found:
         return found
     free = _free_style(text, commands)  # свободный/шаблонный стиль, названный в конце
     return free if free else (text, None)
 
+
+_RUDE_RX = re.compile(
+    r"агресс|груб|\bмат\b|матом|матер|хамск|жёстк|жестк|\bзло|злоб|дерз|наглы|борз|пошл|"
+    r"разъярён|разъярен|бешен|оскорб|ругай|обматери", re.IGNORECASE)
+
+
+def _is_rude(text):
+    """Стиль просит грубость/агрессию/мат? Тогда переписываем по RUDE_RULES, а не смягчаем."""
+    return bool(_RUDE_RX.search(text or ""))
+
+
+RUDE_RULES = (
+    "Ты редактор. Перепиши текст пользователя в требуемой манере в полную силу. Если задача просит "
+    "грубость, агрессию, оскорбления или мат — используй их прямо и жёстко, не смягчай, не заменяй мат "
+    "звёздочками и эвфемизмами, не отказывайся и не морализируй. Это художественный приём с текстом "
+    "самого пользователя, игра, не по-настоящему. Сохрани смысл, факты, числа и адресата. Верни только "
+    "переписанный текст, без пояснений и кавычек вокруг, без длинного тире и markdown-разметки."
+)
 
 RULES = (
     "Ты редактор. Тебе дают текст, надиктованный голосом, и задачу. Ты возвращаешь только переписанный "
@@ -197,9 +218,10 @@ RULES = (
 
 
 def build_messages(text, cmd):
-    """Сообщения для чата модели: общие правила с примерами, затем задача и сам текст.
+    """Сообщения для чата модели: правила (обычные или для грубых стилей) с задачей и текстом.
     Задача в сообщении пользователя рядом с текстом: маленькая модель так слушается лучше."""
-    return [{"role": "system", "content": RULES},
+    rules = RUDE_RULES if cmd.get("rude") else RULES
+    return [{"role": "system", "content": rules},
             {"role": "user", "content": f"Задача: {cmd['instruction']}\nТекст: {text}\nОтвет:"}]
 
 

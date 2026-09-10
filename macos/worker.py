@@ -153,6 +153,8 @@ def do_rewrite(llm, rw, body, cmd):
         result = rewrite.humanize(raw)
         log(f"переписано за {time.time() - t2:.1f} с → {result[:300]}")
         if not rewrite.accept(body, result, cmd):
+            if cmd.get("rude") and not result.strip():
+                raise ValueError("модель отказалась от грубого стиля (у DeepSeek цензура) — попробуйте Grok")
             raise ValueError("ответ модели пустой, слишком короткий или это рассуждение вместо текста")
         return result, {"rewrite": cmd["key"], "rewrite_sec": round(time.time() - t2, 2)}
     except Exception as e:  # noqa: BLE001 — текст терять нельзя, вставляем исходник
