@@ -56,6 +56,7 @@ from common import rewrite  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from llm import Rewriter  # noqa: E402
+import apillm  # noqa: E402
 
 HOME_DIR = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 
@@ -118,7 +119,16 @@ def rewrite_settings():
             "answer_model": answer_model if isinstance(answer_model, str) else "",
             "answer_keyword": answer_keyword.strip() if isinstance(answer_keyword, str) else "",
             "answer_thinking": bool(cfg.get("answer_thinking", False)),
-            "personas": _personas(cfg.get("answer_personas"))}
+            "personas": _personas(cfg.get("answer_personas")),
+            # облачный движок переписывания: если задан ключ, переписываем через API, а не локально
+            "api_url": str(cfg.get("rewrite_api_url") or ""),
+            "api_key": str(cfg.get("rewrite_api_key") or ""),
+            "api_model": str(cfg.get("rewrite_api_model") or ""),
+            "enabled": bool(cfg.get("rewrite_enabled", True))}
+
+
+def use_api(rw):
+    return bool(rw["api_url"] and rw["api_key"] and rw["api_model"])
 
 
 def on_download(name):
@@ -129,12 +139,19 @@ def on_download(name):
 def do_rewrite(llm, rw, body, cmd):
     """(текст для вставки, поля ответа). При любой ошибке — исходник без команды и rewrite_error."""
     out({"status": "rewrite", "command": cmd["title"]})
-    log(f"переписываю ({cmd['key']}: {cmd['title']}) ← {body[:300]}")
+    where = "API" if use_api(rw) else "локально"
+    log(f"переписываю ({cmd['key']}: {cmd['title']}, {where}) ← {body[:300]}")
     t2 = time.time()
     try:
-        raw = llm.rewrite(rw["model"], rewrite.build_messages(body, cmd), rw["idle_sec"], on_download=on_download)
+        messages = rewrite.build_messages(body, cmd)
+        if use_api(rw):
+            raw = apillm.chat(rw["api_url"], rw["api_key"], rw["api_model"], messages, max_tokens=800)
+        elif rw["model"]:
+            raw = llm.rewrite(rw["model"], messages, rw["idle_sec"], on_download=on_download)
+        else:
+            raise ValueError("переписывание не настроено — добавьте ключ API в настройках")
         result = rewrite.humanize(raw)
-        log(f"модель ответила за {time.time() - t2:.1f} с → {result[:300]}")
+        log(f"переписано за {time.time() - t2:.1f} с → {result[:300]}")
         if not rewrite.accept(body, result, cmd):
             raise ValueError("ответ модели пустой, слишком короткий или это рассуждение вместо текста")
         return result, {"rewrite": cmd["key"], "rewrite_sec": round(time.time() - t2, 2)}
@@ -270,15 +287,19 @@ def main():
             text, lang, scores, fixed = recognize(audio)
             extra = {}
             rw = rewrite_settings()
-            asked = rewrite.split_answer(text, rw["answer_keyword"], rw["personas"]) if rw["answer_model"] else None
+            asked = rewrite.split_answer(text, rw["answer_keyword"], rw["personas"]) if rw["answer_model"] or use_api(rw) else None
             if asked:  # «ответь, …» — вопрос модели, в текст ничего не вставляется
                 question, persona = asked
                 out({"status": "answer", "command": (persona + ": " if persona else "") + question[:60]})
                 log(f"отвечаю{' (' + persona + ')' if persona else ''} ← {question[:300]}")
                 t2 = time.time()
                 try:
-                    raw = llm.rewrite(rw["answer_model"], rewrite.build_answer_messages(question, persona), rw["idle_sec"],
-                                      max_tokens=1500, thinking=rw["answer_thinking"], on_download=on_download)
+                    ans_msgs = rewrite.build_answer_messages(question, persona)
+                    if use_api(rw):
+                        raw = apillm.chat(rw["api_url"], rw["api_key"], rw["api_model"], ans_msgs, max_tokens=1500)
+                    else:
+                        raw = llm.rewrite(rw["answer_model"], ans_msgs, rw["idle_sec"],
+                                          max_tokens=1500, thinking=rw["answer_thinking"], on_download=on_download)
                     answer = rewrite.humanize(raw)
                     if not answer:
                         raise ValueError("модель ничего не ответила")
@@ -290,7 +311,8 @@ def main():
                     out({"text": "", "question": question, "answer_error": f"{type(e).__name__}: {e}"})
                 last_use = time.time()
                 continue
-            body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if rw["model"] else (text, None)
+            active = rw["enabled"] and (use_api(rw) or rw["model"])
+            body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if active else (text, None)
             if cmd:
                 text, extra = do_rewrite(llm, rw, body, cmd)
                 last_use = time.time()

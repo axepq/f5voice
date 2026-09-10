@@ -49,15 +49,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let axLabel = NSTextField(labelWithString: "")
     // Переписывание и ответы
     private let rewriteBox = NSButton(checkboxWithTitle: "Переписывать текст по команде в конце фразы", target: nil, action: nil)
-    private let rewriteModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let idleField = NSTextField(string: "")
+    private let providerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let keyField = NSSecureTextField(string: "")
+    private let apiModelField = NSTextField(string: "")
     private let keywordField = NSTextField(string: "")
-    private let answerBox = NSButton(checkboxWithTitle: "Отвечать на вопрос, начатый со слова «ответь»", target: nil, action: nil)
-    private let answerModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let thinkingBox = NSButton(checkboxWithTitle: "Подумать перед ответом (точнее, но дольше: 15–40 с)", target: nil, action: nil)
     private let stylesTable = NSTableView()
     private var styles: [(triggers: String, instruction: String)] = []
-    private var modelChoices: [String] = []          // модели переписывания/ответов в порядке пунктов popup
     private var whisperModelChoices: [String] = []   // модели распознавания в порядке пунктов modelPopup
     private var hotkeySpecs: [String] = []
     private var timer: Timer?
@@ -231,39 +228,30 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         // Переписывание и ответы
         rewriteBox.target = self
         rewriteBox.action = #selector(rewriteToggled)
-        answerBox.target = self
-        answerBox.action = #selector(answerToggled)
-        answerBox.toolTip = "«Ответь, что такое DNS» — ответ появится в отдельном окне, в текст ничего не вставляется"
-        thinkingBox.target = self
-        thinkingBox.action = #selector(thinkingToggled)
-        for popup in [rewriteModelPopup, answerModelPopup] {
-            popup.target = self
-            popup.action = #selector(modelPopupChanged(_:))
-            popup.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        }
-        for field in [idleField, keywordField] {
+        providerPopup.target = self
+        providerPopup.action = #selector(providerChanged)
+        providerPopup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        for repl in rewriteProviders { providerPopup.addItem(withTitle: repl.label) }
+        providerPopup.toolTip = "Переписывает облачная модель по API. DeepSeek и Grok — вольнее и с юмором"
+        for field in [keyField, apiModelField, keywordField] {
             field.delegate = self
             field.target = self
             field.action = #selector(fieldChanged)
         }
-        idleField.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        idleField.alignment = .right
-        idleField.toolTip = "Модель занимает память только пока нужна: через столько минут без команд она выгружается"
+        keyField.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        keyField.placeholderString = "sk-…  (ключ хранится только у вас, в config.json)"
+        apiModelField.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        apiModelField.placeholderString = "deepseek-chat"
+        apiModelField.toolTip = "Имя модели у провайдера, например deepseek-chat или grok-3"
         keywordField.widthAnchor.constraint(equalToConstant: 140).isActive = true
         keywordField.placeholderString = "команда"
         keywordField.toolTip = "«…текст. Команда: сделай списком» — после этого слова идёт своя инструкция модели"
-        let idleUnit = NSTextField(labelWithString: "мин без команд")
-        idleUnit.textColor = .secondaryLabelColor
-        let idleRow = NSStackView(views: [idleField, idleUnit])
-        idleRow.spacing = 6
         let aiForm = NSGridView(views: [
             [NSGridCell.emptyContentView, rewriteBox],
-            [label("Модель"), rewriteModelPopup],
-            [label("Выгружать через"), idleRow],
+            [label("Провайдер"), providerPopup],
+            [label("Ключ API"), keyField],
+            [label("Модель"), apiModelField],
             [label("Слово для своей инструкции"), keywordField],
-            [NSGridCell.emptyContentView, answerBox],
-            [label("Модель ответов"), answerModelPopup],
-            [NSGridCell.emptyContentView, thinkingBox],
         ])
         aiForm.rowSpacing = 10
         aiForm.columnSpacing = 12
@@ -400,20 +388,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         termPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineInTerminals } ?? 0)
         otherPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineElsewhere } ?? 1)
         trailingBox.state = c.trailingSpace ? .on : .off
-        rewriteBox.state = c.rewriteModel.isEmpty ? .off : .on
-        answerBox.state = c.answerModel.isEmpty ? .off : .on
-        thinkingBox.state = c.answerThinking ? .on : .off
-        modelChoices = rewriteModels.map { $0.0 }
-        for extra in [c.rewriteModel, c.answerModel] where !extra.isEmpty && !modelChoices.contains(extra) { modelChoices.append(extra) }
-        for (popup, current) in [(rewriteModelPopup, c.rewriteModel), (answerModelPopup, c.answerModel)] {
-            popup.removeAllItems()
-            for repo in modelChoices { popup.addItem(withTitle: rewriteModels.first { $0.0 == repo }?.1 ?? repo) }
-            popup.selectItem(at: modelChoices.firstIndex(of: current) ?? (popup === rewriteModelPopup ? 0 : 1))
-        }
-        rewriteModelPopup.isEnabled = !c.rewriteModel.isEmpty
-        answerModelPopup.isEnabled = !c.answerModel.isEmpty
-        thinkingBox.isEnabled = !c.answerModel.isEmpty
-        if idleField.currentEditor() == nil { idleField.stringValue = String(Int(c.rewriteIdleMinutes.rounded())) }
+        rewriteBox.state = c.rewriteEnabled ? .on : .off
+        providerPopup.selectItem(at: rewriteProviders.firstIndex { $0.id == c.rewriteApiProvider } ?? 0)
+        if keyField.currentEditor() == nil { keyField.stringValue = c.rewriteApiKey }
+        if apiModelField.currentEditor() == nil { apiModelField.stringValue = c.rewriteApiModel }
+        for ctl in [providerPopup, keyField, apiModelField, keywordField] as [NSControl] { ctl.isEnabled = c.rewriteEnabled }
         if keywordField.currentEditor() == nil { keywordField.stringValue = c.rewriteKeyword }
         if stylesTable.currentEditor() == nil {
             styles = c.rewriteCommands
@@ -506,8 +485,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         let row = stylesTable.selectedRow
         let trigger = row >= 0 && row < styles.count && !styles[row].triggers.isEmpty
             ? String(styles[row].triggers.split(separator: "|")[0]).trimmingCharacters(in: .whitespaces) : "официальный стиль"
-        guard app.config.rewriteModel.isEmpty == false else {
-            return showResult(title: "Переписывание выключено", text: "Включите галочку «Переписывать текст по команде».")
+        guard app.config.rewriteEnabled, !app.config.rewriteApiKey.isEmpty, !app.config.rewriteApiModel.isEmpty else {
+            return showResult(title: "Переписывание не настроено", text: "Включите галочку, выберите провайдера и впишите ключ API и модель.")
         }
         status.stringValue = "Переписываю стилем «\(trigger)»…"
         app.rewriteSample(sample, trigger: trigger) { [weak self] reply in
@@ -535,18 +514,20 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     }
 
     @objc private func rewriteToggled() {
-        let on = rewriteBox.state == .on
-        app.apply(["rewrite_model": on ? modelChoices[max(rewriteModelPopup.indexOfSelectedItem, 0)] : ""])
+        app.apply(["rewrite_enabled": rewriteBox.state == .on])
     }
 
-    @objc private func answerToggled() {
-        let on = answerBox.state == .on
-        let picked = answerModelPopup.indexOfSelectedItem
-        let repo = picked >= 0 && picked < modelChoices.count ? modelChoices[picked] : "mlx-community/Mistral-Nemo-Instruct-2407-4bit"
-        app.apply(["answer_model": on ? repo : ""])
+    @objc private func providerChanged() {
+        guard !updating else { return }
+        let prov = rewriteProviders[max(providerPopup.indexOfSelectedItem, 0)]
+        var updates: [String: Any] = ["rewrite_api_provider": prov.id]
+        if prov.id != "custom" {
+            updates["rewrite_api_url"] = prov.url
+            if app.config.rewriteApiModel.isEmpty { updates["rewrite_api_model"] = prov.model; apiModelField.stringValue = prov.model }
+        }
+        app.apply(updates)
+        if prov.id == "custom" { status.stringValue = "Свой провайдер: впишите адрес в rewrite_api_url в config.json" }
     }
-
-    @objc private func thinkingToggled() { app.apply(["answer_thinking": thinkingBox.state == .on]) }
 
     @objc private func whisperModelChanged() {
         guard !updating, modelPopup.indexOfSelectedItem >= 0, modelPopup.indexOfSelectedItem < whisperModelChoices.count else { return }
@@ -558,14 +539,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         }
     }
 
-    @objc private func modelPopupChanged(_ sender: NSPopUpButton) {
-        guard !updating, sender.indexOfSelectedItem >= 0, sender.indexOfSelectedItem < modelChoices.count else { return }
-        let repo = modelChoices[sender.indexOfSelectedItem]
-        app.apply([sender === rewriteModelPopup ? "rewrite_model" : "answer_model": repo])
-        if !FileManager.default.fileExists(atPath: modelCachePath(repo)) {
-            status.stringValue = "Модель скачается при первой команде (несколько ГБ, один раз)"
-        }
-    }
 
     @objc private func copyHistory() {
         let row = historyTable.selectedRow
@@ -606,9 +579,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         var updates: [String: Any] = [:]
         let langs = languagesField.stringValue.trimmingCharacters(in: .whitespaces)
         if !langs.isEmpty, langs != app.config.languages { updates["languages"] = langs }
-        if let m = Double(idleField.stringValue.trimmingCharacters(in: .whitespaces)), m >= 0, m != app.config.rewriteIdleMinutes {
-            updates["rewrite_idle_minutes"] = max(m, 0.1)
-        }
+        let key = keyField.stringValue.trimmingCharacters(in: .whitespaces)
+        if key != app.config.rewriteApiKey { updates["rewrite_api_key"] = key }
+        let apiModel = apiModelField.stringValue.trimmingCharacters(in: .whitespaces)
+        if apiModel != app.config.rewriteApiModel { updates["rewrite_api_model"] = apiModel }
         let kw = keywordField.stringValue.trimmingCharacters(in: .whitespaces)
         if kw != app.config.rewriteKeyword { updates["rewrite_keyword"] = kw }
         if !updates.isEmpty { app.apply(updates) }

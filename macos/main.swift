@@ -42,6 +42,13 @@ let rewriteModels = [
     ("mlx-community/Qwen3-8B-4bit", "Qwen3 8B — точнее, 5 ГБ"),
     ("mlx-community/Mistral-Nemo-Instruct-2407-4bit", "Mistral Nemo 12B — живая и вольная, 7 ГБ (ответы)"),
 ]
+/// Провайдеры облачного переписывания: (id, подпись, адрес, модель по умолчанию). Дублирует apillm.PROVIDERS.
+let rewriteProviders: [(id: String, label: String, url: String, model: String)] = [
+    ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+    ("grok", "xAI Grok", "https://api.x.ai/v1", "grok-3"),
+    ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
+    ("custom", "Свой (укажите адрес)", "", ""),
+]
 /// Встроенные стили переписывания для окна настроек (фраза, что делает). Дублирует BUILTIN_STYLES в common/rewrite.py.
 let builtinStyleList: [(phrase: String, summary: String)] = [
     ("официальный стиль", "деловое письмо, обращение на Вы"),
@@ -77,8 +84,13 @@ struct Config {
     var newlineElsewhere = "shift"
     var style = "glass"                 // glass | metal | clear | dark
     var recordMode = "auto"             // auto — нажатие или удержание | toggle — только нажатие | hold — только удержание
-    // Переписывание по команде и ответы на вопросы: читает воркер из config.json сам, здесь — для окна настроек.
-    var rewriteModel = rewriteModels[0].0   // "" — выключено
+    // Переписывание через облачный API (DeepSeek/Grok/…). Читает воркер из config.json; здесь — для окна настроек.
+    var rewriteEnabled = true
+    var rewriteApiProvider = "deepseek"
+    var rewriteApiUrl = ""
+    var rewriteApiKey = ""
+    var rewriteApiModel = ""
+    var rewriteModel = ""                    // локальная модель (по умолчанию выключена, код цел)
     var rewriteIdleMinutes = 1.0
     var rewriteKeyword = "команда"
     var rewriteCommands: [(triggers: String, instruction: String)] = []  // свои стили, порядок как в файле
@@ -130,6 +142,11 @@ struct Config {
         if let v = obj["style"] as? String, !v.isEmpty { c.style = v }
         if let v = obj["record_mode"] as? String, ["auto", "toggle", "hold"].contains(v) { c.recordMode = v }
         if let v = obj["rewrite_model"] as? String { c.rewriteModel = v }
+        if let v = obj["rewrite_enabled"] as? Bool { c.rewriteEnabled = v }
+        if let v = obj["rewrite_api_provider"] as? String { c.rewriteApiProvider = v }
+        if let v = obj["rewrite_api_url"] as? String { c.rewriteApiUrl = v }
+        if let v = obj["rewrite_api_key"] as? String { c.rewriteApiKey = v }
+        if let v = obj["rewrite_api_model"] as? String { c.rewriteApiModel = v }
         if let v = obj["rewrite_idle_minutes"] as? Double { c.rewriteIdleMinutes = v }
         if let v = obj["rewrite_keyword"] as? String { c.rewriteKeyword = v }
         if let v = obj["rewrite_commands"] as? [String: String] {

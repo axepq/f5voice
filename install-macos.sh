@@ -118,22 +118,10 @@ from huggingface_hub import snapshot_download
 snapshot_download(sys.argv[1])
 PY
 
-# Модели для переписывания и ответов: качаются здесь, чтобы первая команда не ждала минуты.
-# "" в config.json — функция выключена, модель не нужна.
-for pair in "rewrite_model|mlx-community/Qwen3-4B-Instruct-2507-4bit|переписывания|2,5" "answer_model|mlx-community/Mistral-Nemo-Instruct-2407-4bit|ответов|6,5"; do
-    IFS='|' read -r key default what size <<<"$pair"
-    LLM="$("$HOME_DIR/venv/bin/python" -c "import json;c=json.load(open('$HOME_DIR/config.json'));print(c.get('$key','$default'))")"
-    [[ -n "$LLM" ]] || continue
-    step "Модель для $what $LLM (первый раз около $size ГБ)"
-    "$HOME_DIR/venv/bin/python" - "$LLM" <<'PY' || fail "не удалось скачать модель $LLM — проверь интернет; выключить: \"$key\": \"\" в $HOME_DIR/config.json"
-import sys
-from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[1])
-PY
-done
+# Переписывание идёт через облачный API (ключ в настройках) — локальные LLM не качаем.
 
 step "Прогрев Python-пакетов (первый импорт компилирует их, иначе первый запуск ждёт полминуты)"
-"$HOME_DIR/venv/bin/python" -c "import mlx_whisper, mlx_lm, numpy" >/dev/null 2>&1 || true
+"$HOME_DIR/venv/bin/python" -c "import mlx_whisper, numpy" >/dev/null 2>&1 || true
 
 step "Проверка ядра"
 (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest | tail -1) || fail "самопроверка ядра не прошла"

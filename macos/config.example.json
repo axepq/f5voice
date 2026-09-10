@@ -11,12 +11,14 @@
   "newline_in_terminals": "option",
   "newline_elsewhere": "shift",
   "style": "glass",
-  "rewrite_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
-  "rewrite_idle_minutes": 1,
+  "rewrite_enabled": true,
+  "rewrite_api_provider": "deepseek",
+  "rewrite_api_url": "https://api.deepseek.com/v1",
+  "rewrite_api_key": "",
+  "rewrite_api_model": "deepseek-chat",
   "rewrite_keyword": "команда",
   "rewrite_commands": {},
   "answer_model": "",
   "answer_keyword": "ответь",
-  "answer_thinking": false,
   "answer_personas": {}
 }
