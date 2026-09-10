@@ -149,6 +149,10 @@ try {
         New-Shortcut (Join-Path ([Environment]::GetFolderPath("Startup")) "F5Voice.lnk") $PythonW $ServiceArgs $HomeDir "F5Voice: local dictation (autostart)"
         New-Shortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: local dictation (opens the app window)"
         New-Shortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "F5Voice.lnk") $PythonW $LaunchArgs $HomeDir "F5Voice: local dictation (opens the app window)"
+        # Explorer caches shortcut icons by file path: after the icon file changes it keeps showing the
+        # old picture until the icon cache is rebuilt. ie4uinit -show does that on Windows 10/11.
+        $Ie4 = Join-Path $env:SystemRoot "System32\ie4uinit.exe"
+        if (Test-Path $Ie4) { Start-Process -FilePath $Ie4 -ArgumentList "-show" -WindowStyle Hidden -ErrorAction SilentlyContinue }
 
         Step "Launching"
         Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |

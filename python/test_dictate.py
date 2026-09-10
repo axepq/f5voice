@@ -52,11 +52,16 @@ class HoldGate(unittest.TestCase):
         self.assertEqual(g.press(recording=False, now=0.0), "start")
         self.assertEqual(g.release(recording=True, now=0.8), "stop")     # держал — отпустил — распознаём
 
-    def test_autorepeat_while_held_is_ignored(self):
+    def test_lost_release_does_not_kill_hotkey(self):
+        """Отпускание не пришло (Windows): следующее нажатие всё равно работает и помечено как потеря."""
         g = dictate.HoldGate(hold_after=0.35)
         self.assertEqual(g.press(recording=False, now=0.0), "start")
-        self.assertEqual(g.press(recording=True, now=0.5), "none")       # автоповтор клавиши
-        self.assertEqual(g.release(recording=True, now=0.9), "stop")
+        self.assertFalse(g.lost_release)
+        self.assertEqual(g.press(recording=True, now=5.0), "stop")       # без release — новое нажатие
+        self.assertTrue(g.lost_release)
+        self.assertEqual(g.release(recording=False, now=5.1), "none")
+        self.assertEqual(g.press(recording=False, now=9.0), "start")
+        self.assertFalse(g.lost_release)
 
     def test_release_after_stop_by_second_tap_does_nothing(self):
         g = dictate.HoldGate(hold_after=0.35)
@@ -64,6 +69,30 @@ class HoldGate(unittest.TestCase):
         g.release(recording=True, now=0.1)
         self.assertEqual(g.press(recording=True, now=5.0), "stop")
         self.assertEqual(g.release(recording=False, now=5.9), "none")    # долго держал второе нажатие — ничего
+
+
+class KeyIs(unittest.TestCase):
+    """Отпущенная клавиша pynput: под Ctrl буква приходит управляющим символом, сверяем по vk и символу."""
+
+    class K:
+        def __init__(self, char=None, vk=None):
+            self.char, self.vk = char, vk
+
+    def test_plain_letter(self):
+        self.assertTrue(dictate.key_is(self.K(char="d"), "d"))
+        self.assertTrue(dictate.key_is(self.K(char="D"), "d"))
+
+    def test_control_char_under_ctrl(self):
+        self.assertTrue(dictate.key_is(self.K(char="\x04"), "d"))       # Ctrl+D на Windows/Linux
+
+    def test_virtual_key_code(self):
+        self.assertTrue(dictate.key_is(self.K(char=None, vk=0x44), "d"))
+        self.assertTrue(dictate.key_is(self.K(char="\x04", vk=0x44), "d"))
+
+    def test_other_key(self):
+        self.assertFalse(dictate.key_is(self.K(char="e", vk=0x45), "d"))
+        self.assertFalse(dictate.key_is(self.K(char=None, vk=None), "d"))
+        self.assertFalse(dictate.key_is(self.K(char="d"), "space"))
 
 
 class RecordModes(unittest.TestCase):

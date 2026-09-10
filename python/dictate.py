@@ -320,14 +320,17 @@ class HoldGate:
         self.hold_after = hold_after
         self.pressed_at = None
         self.started = False
+        self.lost_release = False
 
     @property
     def held(self):
         return self.pressed_at is not None
 
     def press(self, recording, now=None):
-        if self.pressed_at is not None:      # автоповтор зажатой клавиши
-            return "none"
+        # Нажатие при «ещё зажатой» клавише — это потерянное отпускание, а не автоповтор:
+        # RegisterHotKey с MOD_NOREPEAT и pynput GlobalHotKeys повторов не шлют. Глотать его нельзя,
+        # иначе после одного пропущенного отпускания клавиша молчит до перезапуска.
+        self.lost_release = self.pressed_at is not None
         self.pressed_at = time.monotonic() if now is None else now
         self.started = not recording
         return "start" if not recording else "stop"
@@ -386,6 +389,22 @@ def win_hotkey_spec(normalized):
     return (mods, vk) if vk is not None else None
 
 
+def key_is(key, name):
+    """Отпущенная клавиша pynput — это буква/цифра name? Под зажатым Ctrl pynput отдаёт управляющий
+    символ (Ctrl+D → '\\x04'), а не букву, поэтому сверяем ещё виртуальный код и снимаем Ctrl с символа."""
+    if len(name) != 1:
+        return False
+    vk = getattr(key, "vk", None)
+    if vk is not None and name.isalnum() and vk == ord(name.upper()):
+        return True
+    ch = getattr(key, "char", None)
+    if not ch:
+        return False
+    if len(ch) == 1 and 1 <= ord(ch) <= 26:
+        ch = chr(ord(ch) + 96)                                  # '\\x04' → 'd'
+    return ch.lower() == name.lower()
+
+
 class WinHotkey(threading.Thread):
     """Глобальное сочетание через RegisterHotKey — родной способ Windows, надёжнее хуков pynput."""
 
@@ -395,13 +414,18 @@ class WinHotkey(threading.Thread):
         self.ready = threading.Event()
         self.ok = False
         self.error = ""
+        self.gen = 0
 
-    def _watch_release(self):
-        """WM_HOTKEY приходит только на нажатие; отпускание основной клавиши ловим опросом."""
+    def _watch_release(self, gen):
+        """WM_HOTKEY приходит только на нажатие; отпускание основной клавиши ловим опросом.
+        Если за это время пришло новое нажатие (gen сменился) — отпускание уже учтено, молчим."""
         user32 = ctypes.windll.user32
         while user32.GetAsyncKeyState(self.vk) & 0x8000:
             time.sleep(0.02)
-        self.on_release()
+            if self.gen != gen:
+                return
+        if self.gen == gen:
+            self.on_release()
 
     def run(self):
         import ctypes.wintypes
@@ -416,10 +440,11 @@ class WinHotkey(threading.Thread):
         msg = ctypes.wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == 0x0312:  # WM_HOTKEY
+                self.gen += 1
                 try:
                     self.on_press()
                     if self.on_release:  # WM_HOTKEY приходит только на нажатие — отпускание ловим опросом
-                        threading.Thread(target=self._watch_release, daemon=True).start()
+                        threading.Thread(target=self._watch_release, args=(self.gen,), daemon=True).start()
                 except Exception as e:  # noqa: BLE001
                     log(f"! обработчик клавиши: {e}")
             user32.TranslateMessage(ctypes.byref(msg))
@@ -654,6 +679,11 @@ class HUD(threading.Thread):
             root = tk.Tk()
             root.withdraw()
             self.root, self.tk = root, tk
+            if IS_WINDOWS:  # default= — иконка всех окон процесса, иначе панель задач показывает значок pythonw
+                try:
+                    root.iconbitmap(default=str(Path(__file__).resolve().parent / "F5Voice.ico"))
+                except tk.TclError:
+                    pass
             if IS_WINDOWS:
                 layered = hud.LayeredHud(self.style, self.level_fn, log)
                 layered.start()
@@ -1014,6 +1044,11 @@ class App:
             log("  Linux: sudo apt install libportaudio2; список устройств: dictate.py --list-devices; "
                 "выбрать: \"input_device\" в config.json")
             sys.exit(1)
+        if IS_WINDOWS:  # свой AppUserModelID: панель задач не смешивает нас с python.exe и берёт иконку окна
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("axepq.F5Voice")
+            except Exception:  # noqa: BLE001
+                pass
         self.hud = HUD(self, lambda: self.recorder.level, cfg.get("style", "dark")) if cfg.get("hud", True) else None
         self.hotkey_title = pretty_hotkey(normalize_hotkey(cfg["hotkey"]))
         self.gate = HoldGate(cfg.get("record_mode", "auto"))
@@ -1073,6 +1108,8 @@ class App:
 
     def on_hotkey_press(self):
         action = self.gate.press(self.state == "recording")
+        if self.gate.lost_release:
+            log("! отпускание клавиши не пришло — считаю её отпущенной")
         if action == "none":
             return
         self.toggle()
@@ -1213,10 +1250,8 @@ class App:
                 name = hotkey.split("+")[-1].strip("<>")   # отпускание основной клавиши — режим «удерживать»
                 target = keyboard.KeyCode.from_char(name) if len(name) == 1 else getattr(keyboard.Key, name, None)
                 if target is not None:
-                    def on_release(k, target=target):
-                        same = k == target or (getattr(k, "char", None) and getattr(target, "char", None)
-                                               and k.char.lower() == target.char)
-                        if same:
+                    def on_release(k, target=target, name=name):
+                        if k == target or key_is(k, name):
                             self.on_hotkey_release()
                     self.release_listener = keyboard.Listener(on_release=on_release)
                     self.release_listener.daemon = True

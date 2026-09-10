@@ -40,6 +40,37 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 command -v swiftc >/dev/null 2>&1 || fail "не найден swiftc — переустанови Command Line Tools: xcode-select --install"
 
+# Command Line Tools бывают разобранными: после обновления macOS в SDKs/ появляется новый SDK,
+# а компилятор остаётся от прошлой версии, и swiftc падает на самом модуле Swift
+# («SDK is built with Apple Swift version X, while this compiler is Y»). Проверяем на крошечном
+# файле до сборки; если штатный SDK не подходит — берём из SDKs/ тот, что подходит компилятору.
+SMOKE="$(mktemp -d)"
+printf 'import Cocoa\nprint(NSApplication.shared.isRunning)\n' > "$SMOKE/smoke.swift"
+swift_smoke() {
+    local sdk=()
+    [[ -n "${1:-}" ]] && sdk=(-sdk "$1")
+    # ${sdk[@]+...}: в bash 3.2 пустой массив под set -u считается unbound
+    swiftc ${sdk[@]+"${sdk[@]}"} -target arm64-apple-macosx14.0 "$SMOKE/smoke.swift" -o "$SMOKE/smoke" >"$SMOKE/log" 2>&1
+}
+if ! swift_smoke ""; then
+    SDK_OK=""
+    for sdk in $(printf '%s\n' /Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.sdk | sort -rV); do
+        [[ -d "$sdk" ]] || continue
+        if swift_smoke "$sdk"; then SDK_OK="$sdk"; break; fi
+    done
+    if [[ -n "$SDK_OK" ]]; then
+        export SDKROOT="$SDK_OK"
+        step "Штатный SDK новее компилятора swiftc, собираю с ${SDK_OK##*/}"
+        echo "  Чтобы это не повторялось, обнови Command Line Tools: Системные настройки → Основные → Обновление ПО,"
+        echo "  либо: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install"
+    else
+        tail -3 "$SMOKE/log" >&2
+        rm -rf "$SMOKE"
+        fail "swiftc не собирает даже пустую программу: компилятор и SDK в Command Line Tools не совпадают. Переустанови их: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install — и запусти установку снова."
+    fi
+fi
+rm -rf "$SMOKE"
+
 mkdir -p "$HOME_DIR"
 
 # Откуда исходники: запущены из файла внутри клона — используем его,
