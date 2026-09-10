@@ -110,7 +110,7 @@ def rewrite_settings():
     except (TypeError, ValueError):
         idle_sec = rewrite.DEFAULT_IDLE_MINUTES * 60
     keyword = cfg.get("rewrite_keyword", rewrite.DEFAULT_KEYWORD)
-    answer_model = cfg.get("answer_model", rewrite.ANSWER_MODEL)
+    answer_model = cfg.get("answer_model", "")  # по умолчанию ответы выключены; код цел, включается в настройках
     answer_keyword = cfg.get("answer_keyword", rewrite.ANSWER_KEYWORD)
     return {"model": model if isinstance(model, str) else "", "idle_sec": idle_sec,
             "keyword": keyword.strip() if isinstance(keyword, str) else "",

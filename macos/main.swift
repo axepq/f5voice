@@ -82,7 +82,7 @@ struct Config {
     var rewriteIdleMinutes = 1.0
     var rewriteKeyword = "команда"
     var rewriteCommands: [(triggers: String, instruction: String)] = []  // свои стили, порядок как в файле
-    var answerModel = rewriteModels[2].0    // "" — выключено
+    var answerModel = ""    // ответы выключены по умолчанию; включаются галочкой (тогда берётся Nemo)
     var answerKeyword = "ответь"
     var answerThinking = false
     var loadError: String?

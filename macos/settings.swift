@@ -541,7 +541,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
 
     @objc private func answerToggled() {
         let on = answerBox.state == .on
-        app.apply(["answer_model": on ? modelChoices[max(answerModelPopup.indexOfSelectedItem, 0)] : ""])
+        let picked = answerModelPopup.indexOfSelectedItem
+        let repo = picked >= 0 && picked < modelChoices.count ? modelChoices[picked] : "mlx-community/Mistral-Nemo-Instruct-2407-4bit"
+        app.apply(["answer_model": on ? repo : ""])
     }
 
     @objc private func thinkingToggled() { app.apply(["answer_thinking": thinkingBox.state == .on]) }
