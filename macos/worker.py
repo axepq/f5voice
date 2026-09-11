@@ -274,6 +274,21 @@ def main():
                         continue
                     text, extra = do_rewrite(llm, rw, body, cmd)
                     out({"text": text, "sec": round(time.time() - t1, 2), **extra})
+                elif "refine" in req and use_api(rw):
+                    r = req["refine"]
+                    variants = [str(v) for v in (r.get("variants") or [])]
+                    audio = load_audio(r["path"])          # голосовая правка ещё как звук — распознаём
+                    instruction, _lang, _sc, _fx = recognize(audio)
+                    out({"status": "variants", "command": instruction[:40]})
+                    log(f"правка вариантов ← {instruction[:200]}")
+                    raw = apillm.chat(rw["api_url"], rw["api_key"], rw["api_model"],
+                                      rewrite.build_refine_messages(variants, instruction, r.get("style", "")),
+                                      max_tokens=1200)
+                    new = rewrite.parse_variants(raw)
+                    if not new:
+                        raise ValueError("модель не вернула варианты после правки")
+                    out({"text": "", "variants": new, "style": r.get("style", ""),
+                         "body": r.get("body", ""), "sec": round(time.time() - t1, 2)})
                 else:
                     out({"text": "", "error": "неизвестная команда"})
             except Exception as e:  # noqa: BLE001

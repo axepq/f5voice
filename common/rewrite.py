@@ -420,3 +420,15 @@ def parse_variants(raw, count=VARIANTS_COUNT):
         if line:
             lines.append(line)
     return lines[:count]
+
+
+def build_refine_messages(variants, instruction, style="", count=VARIANTS_COUNT):
+    """Текущие варианты + голосовая правка → новые варианты. Правка может быть грубой."""
+    rude = _is_rude(instruction) or _is_rude(style)
+    rules = RUDE_RULES if rude else RULES
+    cur = "\n".join(f"{i + 1}. {v}" for i, v in enumerate(variants))
+    task = (f"Вот текущие варианты текста:\n{cur}\n\nПользователь просит изменить их так: {instruction}\n"
+            f"Примени эту правку ко всем и верни ровно {count} новых варианта JSON-массивом строк, "
+            f"без пояснений. Сохрани смысл и факты, меняй только то, о чём просят.")
+    return [{"role": "system", "content": rules},
+            {"role": "user", "content": task}]

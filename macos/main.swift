@@ -419,6 +419,7 @@ final class Worker {
         var answerError: String?
         var variants: [String]?     // просили «предложи варианты»: показываем блок выбора
         var variantStyle: String?
+        var variantBody: String?    // исходник, чтобы можно было править варианты голосом
         var variantsError: String?
     }
 
@@ -513,6 +514,15 @@ final class Worker {
         send(line, completion: completion)
     }
 
+    /// Голосовая правка вариантов: путь к записи + текущие варианты → новые варианты.
+    func refine(_ path: String, variants: [String], body: String, style: String,
+                completion: @escaping (Reply) -> Void) {
+        let req: [String: Any] = ["refine": ["path": path, "variants": variants, "body": body, "style": style]]
+        guard let data = try? JSONSerialization.data(withJSONObject: req),
+              let line = String(data: data, encoding: .utf8) else { return completion(Reply(error: "не собрал запрос")) }
+        send(line, completion: completion)
+    }
+
     /// Пустая строка воркеру: началась запись, модель переписывания не должна выгрузиться посреди неё.
     func ping() {
         guard isReady, pending == nil, let pipe = stdinPipe else { return }
@@ -580,6 +590,7 @@ final class Worker {
         r.answerError = obj["answer_error"] as? String
         r.variants = obj["variants"] as? [String]
         r.variantStyle = obj["style"] as? String
+        r.variantBody = obj["body"] as? String
         r.variantsError = obj["variants_error"] as? String
         r.sec = (obj["sec"] as? Double) ?? 0
         r.lang = (obj["lang"] as? String) ?? ""
@@ -1002,6 +1013,7 @@ final class App: NSObject, NSApplicationDelegate {
     static let shared = App()
 
     var state: State = .idle
+    private var refining = false   // F5 нажат при открытом блоке вариантов: запись уходит в правку
     var tap: CFMachPort?
     private(set) var config = Config.load()
     private(set) var hotkey = HotKey.parse("F5")!
@@ -1443,6 +1455,7 @@ final class App: NSObject, NSApplicationDelegate {
                      symbol: "mic.slash.fill", tint: .systemOrange, hideAfter: 6)
             return
         }
+        refining = variantsPanel.isVisible
         worker.ping()
         do {
             try recorder.start(to: lastWav)
@@ -1486,13 +1499,21 @@ final class App: NSObject, NSApplicationDelegate {
         state = .transcribing
         updateIcon()
         play("Pop")
-        showTranscribing()
-        log(String(format: "записано %.1f с, распознаю", seconds))
-        // Пока воркер грузит (или качает) модель, запрос лежит в очереди: на это даём долгий таймаут.
-        // Короткий таймаут распознавания взводится в onSent, когда путь реально ушёл воркеру.
         armTimeout(loadTimeoutSeconds, what: "воркер не загрузил модель")
-        worker.transcribe(lastWav) { [weak self] reply in
-            self?.handle(reply)
+        if refining, variantsPanel.isVisible {   // правка открытого блока вариантов
+            let violet = NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1)
+            hud.show("Меняю варианты…   Esc — отменить", symbol: "wand.and.stars", tint: violet, bars: .wave, animate: .pulse)
+            log(String(format: "записано %.1f с, правлю варианты", seconds))
+            worker.refine(lastWav, variants: variantsPanel.variantTexts,
+                          body: variantsPanel.bodyText, style: variantsPanel.styleText) { [weak self] reply in
+                self?.handle(reply)
+            }
+        } else {
+            showTranscribing()
+            log(String(format: "записано %.1f с, распознаю", seconds))
+            worker.transcribe(lastWav) { [weak self] reply in
+                self?.handle(reply)
+            }
         }
     }
 
@@ -1529,7 +1550,7 @@ final class App: NSObject, NSApplicationDelegate {
         if let variants = reply.variants {
             log("вариантов: \(variants.count)")
             hud.hide()
-            variantsPanel.show(style: reply.variantStyle ?? "", variants: variants)
+            variantsPanel.show(style: reply.variantStyle ?? "", body: reply.variantBody ?? "", variants: variants)
             return
         }
         if let err = reply.variantsError {
@@ -1705,8 +1726,12 @@ final class VariantsPanel: NSObject {
     private let panel: VariantsWindow
     private let stack = NSStackView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private var variants: [String] = []
+    private(set) var variantTexts: [String] = []
+    private(set) var bodyText = ""
+    private(set) var styleText = ""
     private var previousApp: NSRunningApplication?
+
+    var isVisible: Bool { panel.isVisible }
 
     override init() {
         panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 200),
@@ -1757,10 +1782,13 @@ final class VariantsPanel: NSObject {
         ])
     }
 
-    func show(style: String, variants: [String]) {
-        self.variants = variants
-        previousApp = NSWorkspace.shared.frontmostApplication
-        titleLabel.stringValue = (style.isEmpty ? "Варианты" : "Варианты · \(style)") + "  ·  1–\(variants.count) или клик, Esc — отмена"
+    func show(style: String, body: String, variants: [String]) {
+        self.variantTexts = variants
+        self.styleText = style
+        self.bodyText = body
+        if !panel.isVisible { previousApp = NSWorkspace.shared.frontmostApplication }
+        titleLabel.stringValue = (style.isEmpty ? "Варианты" : "Варианты · \(style)")
+            + "  ·  1–\(variants.count) или клик · F5 — правка голосом · Esc — отмена"
         for v in stack.arrangedSubviews { v.removeFromSuperview() }
         for (i, text) in variants.enumerated() {
             stack.addArrangedSubview(makeRow(index: i, text: text))
@@ -1822,8 +1850,8 @@ final class VariantsPanel: NSObject {
     }
 
     private func pick(_ i: Int) {
-        guard i >= 0, i < variants.count else { return }
-        let text = variants[i]
+        guard i >= 0, i < variantTexts.count else { return }
+        let text = variantTexts[i]
         let cfg = App.shared.config
         panel.close()
         previousApp?.activate(options: [])
