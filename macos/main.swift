@@ -882,7 +882,7 @@ final class HUD {
                 // Объёмное жидкое стекло: чистый стиль + тёмный тон, а блик-оверлей — ВНУТРЬ контента.
                 glass.setValue(1, forKey: "style")
                 glass.setValue(NSColor.black.withAlphaComponent(0.32), forKey: "tintColor")
-                content.addSubview(makeSheen(bounds, cornerRadius: 25))
+                content.addSubview(makeSheen(bounds, cornerRadius: 25, rim: false))
             } else if style == "metal" {
                 // Объёмное жидкое стекло + металлический край: блик внутри контента, кромку рисует MetalRing.
                 glass.setValue(1, forKey: "style")
