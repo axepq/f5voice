@@ -1725,6 +1725,7 @@ final class VariantsPanel: NSObject {
     private let root = NSStackView()
     private var scrollHeight: NSLayoutConstraint!
     private var rowWidth: CGFloat = 600
+    private let sheen = GlassSheen()
     private var keyMonitor: Any?
     private(set) var variantTexts: [String] = []
     private(set) var bodyText = ""
@@ -1778,16 +1779,21 @@ final class VariantsPanel: NSObject {
         root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        // Настоящее стекло macOS 26 (Liquid Glass) — чистое прозрачное стекло; иначе размытие HUD.
+        // Контейнер: снизу — стекло (настоящее Liquid Glass macOS 26, иначе размытие HUD),
+        // сверху — тонкий световой блик и кромка (объём 3D), клики пропускает.
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 240))
+        container.wantsLayer = true
         if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
+            let glass = NSGlassEffectView(frame: container.bounds)
+            glass.autoresizingMask = [.width, .height]
             glass.cornerRadius = 28
             glass.setValue(1, forKey: "style")                         // clear — чистое прозрачное стекло (как в водах), а не морозное
             glass.tintColor = NSColor.black.withAlphaComponent(0.10)   // едва заметный тон только чтобы белый текст читался
             glass.contentView = root
-            panel.contentView = glass
+            container.addSubview(glass)
         } else {
-            let v = NSVisualEffectView()
+            let v = NSVisualEffectView(frame: container.bounds)
+            v.autoresizingMask = [.width, .height]
             v.material = .hudWindow
             v.blendingMode = .behindWindow
             v.state = .active
@@ -1801,8 +1807,12 @@ final class VariantsPanel: NSObject {
                 root.trailingAnchor.constraint(equalTo: v.trailingAnchor),
                 root.bottomAnchor.constraint(equalTo: v.bottomAnchor),
             ])
-            panel.contentView = v
+            container.addSubview(v)
         }
+        sheen.frame = container.bounds
+        sheen.autoresizingMask = [.width, .height]
+        container.addSubview(sheen)
+        panel.contentView = container
     }
 
     func show(style: String, body: String, variants: [String]) {
@@ -1832,19 +1842,40 @@ final class VariantsPanel: NSObject {
 
         let already = panel.isVisible
         if !already {
-            // Капля поднимается из плашки: старт маленькой каплей у низа, подъём и разворот в блок.
-            let drop = NSRect(x: visible.midX - 90, y: visible.minY + 24, width: 180, height: 46)
+            // Капля поднимается из голосовой плашки: маленькая, чуть вытянутая капля у низа,
+            // затем упруго раскрывается в стеклянный блок; текст подхватывается следом.
+            let drop = NSRect(x: visible.midX - 33, y: visible.minY + 46, width: 66, height: 84)
             panel.setFrame(drop, display: false)
             panel.alphaValue = 0
+            root.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             installKeyMonitor()
-        }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = already ? 0.22 : 0.42
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)   // мягкий текучий выкат
-            panel.animator().setFrame(finalFrame, display: true)
-            panel.animator().alphaValue = 1
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().alphaValue = 1                          // капля проявляется
+            }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.6
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.94, 0.24, 1)  // плавный подъём и мягкое раскрытие
+                panel.animator().setFrame(finalFrame, display: true)
+            }
+            // Контент проявляется, когда в блоке уже есть место — чтобы текст не сплющивался в капле.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.3
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.root.animator().alphaValue = 1
+                }
+            }
+        } else {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.24
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
+                panel.animator().setFrame(finalFrame, display: true)
+                root.animator().alphaValue = 1
+            }
         }
     }
 
@@ -1870,36 +1901,24 @@ final class VariantsPanel: NSObject {
         row.wantsLayer = true
         row.layer?.cornerRadius = 12
         row.translatesAutoresizingMaskIntoConstraints = false
-        let badge = NSTextField(labelWithString: "\(index + 1)")
-        badge.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-        badge.textColor = .white
-        badge.alignment = .center
-        badge.wantsLayer = true
-        let bg = CAGradientLayer()
-        bg.colors = [NSColor(calibratedRed: 0.42, green: 0.55, blue: 1.0, alpha: 1).cgColor,
-                     NSColor(calibratedRed: 0.30, green: 0.40, blue: 0.95, alpha: 1).cgColor]
-        bg.startPoint = CGPoint(x: 0.5, y: 1); bg.endPoint = CGPoint(x: 0.5, y: 0)
-        bg.cornerRadius = 11; bg.frame = CGRect(x: 0, y: 0, width: 22, height: 22)
-        badge.layer?.addSublayer(bg)
-        badge.layer?.cornerRadius = 11
-        badge.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        badge.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let badge = GlassBadge(index + 1)
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = .systemFont(ofSize: 13.5)
         label.textColor = .white
-        label.preferredMaxLayoutWidth = rowWidth - 20 - 22 - 12 - 20
+        label.preferredMaxLayoutWidth = rowWidth - 20 - 24 - 13 - 20
         let h = NSStackView(views: [badge, label])
         h.orientation = .horizontal
         h.alignment = .top
-        h.spacing = 12
+        h.spacing = 13
         h.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(h)
         NSLayoutConstraint.activate([
             h.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
             h.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -9),
-            h.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
+            h.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
             h.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
             row.widthAnchor.constraint(equalToConstant: rowWidth),
+            badge.topAnchor.constraint(equalTo: h.topAnchor, constant: -2),  // бусина по центру первой строки текста
         ])
         return row
     }
@@ -1931,6 +1950,65 @@ final class ClickableRow: NSView {
     }
     override func mouseEntered(with event: NSEvent) { layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor }
     override func mouseExited(with event: NSEvent) { layer?.backgroundColor = .clear }
+}
+
+/// Номер варианта — глянцевая стеклянная бусина: светлый градиент, верхний блик, тень для объёма,
+/// тёмная цифра строго по центру. Слои пересчитываются в layout(), поэтому кружок не «плывёт».
+final class GlassBadge: NSView {
+    private let bead = CAGradientLayer()
+    private let gloss = CAGradientLayer()
+    private let num = NSTextField(labelWithString: "")
+    init(_ n: Int) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+        bead.colors = [NSColor(white: 1.0, alpha: 0.97).cgColor,
+                       NSColor(calibratedRed: 0.80, green: 0.84, blue: 0.90, alpha: 0.85).cgColor]
+        bead.startPoint = CGPoint(x: 0.5, y: 1); bead.endPoint = CGPoint(x: 0.5, y: 0)
+        bead.shadowColor = NSColor.black.cgColor; bead.shadowOpacity = 0.28
+        bead.shadowRadius = 3; bead.shadowOffset = CGSize(width: 0, height: -1)
+        layer?.addSublayer(bead)
+        gloss.colors = [NSColor(white: 1, alpha: 0.9).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
+        gloss.startPoint = CGPoint(x: 0.5, y: 1); gloss.endPoint = CGPoint(x: 0.5, y: 0.45)
+        bead.addSublayer(gloss)
+        num.stringValue = "\(n)"
+        num.font = .monospacedDigitSystemFont(ofSize: 12.5, weight: .bold)
+        num.textColor = NSColor(calibratedRed: 0.12, green: 0.15, blue: 0.22, alpha: 1)
+        num.alignment = .center
+        num.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(num)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 24), heightAnchor.constraint(equalToConstant: 24),
+            num.centerXAnchor.constraint(equalTo: centerXAnchor),
+            num.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() {
+        super.layout()
+        bead.frame = bounds; bead.cornerRadius = bounds.width / 2
+        let inset: CGFloat = 1.5
+        gloss.frame = CGRect(x: inset, y: bounds.height * 0.42, width: bounds.width - 2 * inset, height: bounds.height * 0.58 - inset)
+        gloss.cornerRadius = gloss.frame.width / 2
+    }
+}
+
+/// Верхний световой блик и тонкая светлая кромка поверх стекла — дают ощущение объёмной 3D-плиты.
+/// Клики пропускает насквозь, чтобы не мешать выбору вариантов.
+final class GlassSheen: NSView {
+    private let top = CAGradientLayer()
+    private let rim = CALayer()
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func layout() {
+        super.layout()
+        if top.superlayer == nil { wantsLayer = true; layer?.addSublayer(top); layer?.addSublayer(rim) }
+        top.frame = bounds; top.cornerRadius = 28
+        top.colors = [NSColor(white: 1, alpha: 0.22).cgColor, NSColor(white: 1, alpha: 0.05).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
+        top.locations = [0, 0.14, 0.4]
+        top.startPoint = CGPoint(x: 0.5, y: 1); top.endPoint = CGPoint(x: 0.5, y: 0)
+        rim.frame = bounds; rim.cornerRadius = 28
+        rim.borderWidth = 1; rim.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
+    }
 }
 
 // MARK: - Окно ответа («ответь, …»)
