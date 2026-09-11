@@ -1782,7 +1782,8 @@ final class VariantsPanel: NSObject {
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
             glass.cornerRadius = 28
-            glass.tintColor = NSColor.black.withAlphaComponent(0.26)   // лёгкое затемнение для читаемости белого текста
+            glass.setValue(1, forKey: "style")                         // clear — чистое прозрачное стекло (как в водах), а не морозное
+            glass.tintColor = NSColor.black.withAlphaComponent(0.10)   // едва заметный тон только чтобы белый текст читался
             glass.contentView = root
             panel.contentView = glass
         } else {
