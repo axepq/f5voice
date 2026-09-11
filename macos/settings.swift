@@ -99,28 +99,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             content.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
             holder.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
         ])
+        let glassBG = NSVisualEffectView()
+        glassBG.material = .hudWindow
+        glassBG.blendingMode = .behindWindow
+        glassBG.state = .active
+        glassBG.appearance = NSAppearance(named: .darkAqua)
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        let glassBG: NSView
-        if #available(macOS 26.0, *) {
-            // То же чистое прозрачное стекло, что у блока вариантов: сквозь окно видно рабочий стол, объём.
-            let g = NSGlassEffectView()
-            g.setValue(1, forKey: "style")                              // clear — прозрачное «как вода»
-            g.tintColor = NSColor.black.withAlphaComponent(0.32)        // тон, чтобы текст читался
-            g.contentView = scroll
-            glassBG = g
-        } else {
-            let fx = NSVisualEffectView()
-            fx.material = .hudWindow; fx.blendingMode = .behindWindow; fx.state = .active
-            fx.appearance = NSAppearance(named: .darkAqua)
-            fx.addSubview(scroll)
-            NSLayoutConstraint.activate([
-                scroll.topAnchor.constraint(equalTo: fx.topAnchor),
-                scroll.leadingAnchor.constraint(equalTo: fx.leadingAnchor),
-                scroll.trailingAnchor.constraint(equalTo: fx.trailingAnchor),
-                scroll.bottomAnchor.constraint(equalTo: fx.bottomAnchor),
-            ])
-            glassBG = fx
-        }
+        glassBG.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: glassBG.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: glassBG.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: glassBG.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: glassBG.bottomAnchor),
+        ])
         window.contentView = glassBG
         scrollView = scroll
         let size = content.fittingSize
