@@ -417,6 +417,9 @@ final class Worker {
         var question: String?       // фраза начиналась с «ответь»: text пустой, ответ в answer
         var answer: String?
         var answerError: String?
+        var variants: [String]?     // просили «предложи варианты»: показываем блок выбора
+        var variantStyle: String?
+        var variantsError: String?
     }
 
     var config: Config
@@ -575,6 +578,9 @@ final class Worker {
         r.question = obj["question"] as? String
         r.answer = obj["answer"] as? String
         r.answerError = obj["answer_error"] as? String
+        r.variants = obj["variants"] as? [String]
+        r.variantStyle = obj["style"] as? String
+        r.variantsError = obj["variants_error"] as? String
         r.sec = (obj["sec"] as? Double) ?? 0
         r.lang = (obj["lang"] as? String) ?? ""
         if let fixed = obj["fixed"] as? Int, fixed > 0 { r.lang += ", исправлено сегментов: \(fixed)" }
@@ -1004,6 +1010,7 @@ final class App: NSObject, NSApplicationDelegate {
     private var hotkeyItem: NSMenuItem!
     private lazy var hud = HUD(style: config.style)
     private lazy var answerPanel = AnswerPanel()
+    private lazy var variantsPanel = VariantsPanel()
     private var settings: SettingsWindow?
     private var gate = HoldGate()
     private var holdHint: DispatchWorkItem?
@@ -1051,6 +1058,10 @@ final class App: NSObject, NSApplicationDelegate {
                 self.hud.show("Отвечаю: \(command)…   Esc — отменить", symbol: "bubble.left.and.text.bubble.right",
                               tint: violet, bars: .wave, animate: .pulse)
                 self.armTimeout(rewriteTimeoutSeconds * 2, what: "модель не ответила на вопрос")
+            case "variants":
+                self.hud.show("Готовлю варианты: \(command)…   Esc — отменить", symbol: "rectangle.stack",
+                              tint: violet, bars: .wave, animate: .pulse)
+                self.armTimeout(rewriteTimeoutSeconds, what: "модель не прислала варианты")
             case "download":
                 let name = command.split(separator: "/").last.map(String.init) ?? command
                 self.hud.show("Скачиваю модель \(name), это один раз…   Esc — отменить", symbol: "arrow.down.circle",
@@ -1515,6 +1526,18 @@ final class App: NSObject, NSApplicationDelegate {
             hud.show("Ошибка распознавания — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
             return
         }
+        if let variants = reply.variants {
+            log("вариантов: \(variants.count)")
+            hud.hide()
+            variantsPanel.show(style: reply.variantStyle ?? "", variants: variants)
+            return
+        }
+        if let err = reply.variantsError {
+            log("варианты не вышли: \(err)")
+            play("Basso")
+            hud.show("Не смог сделать варианты — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            return
+        }
         if let q = reply.question {
             if let a = reply.answer {
                 log("ответ на «\(q.prefix(60))»: \(a.count) символов")
@@ -1663,6 +1686,168 @@ func installEditMenu() {
 }
 
 let application = NSApplication.shared
+
+// MARK: - Блок вариантов («…предложи варианты»)
+
+/// Стеклянный блок внизу экрана с несколькими вариантами переписанного текста.
+/// Цифра 1–3 или клик выбирают вариант и печатают его туда, где вы были; Esc закрывает.
+final class VariantsWindow: NSPanel {
+    var onPick: ((Int) -> Void)?
+    override var canBecomeKey: Bool { true }            // без этого не ловим цифры и Esc
+    override func cancelOperation(_ sender: Any?) { close() }
+    override func keyDown(with event: NSEvent) {
+        if let n = Int(event.charactersIgnoringModifiers ?? ""), n >= 1 { onPick?(n - 1) }
+        else { super.keyDown(with: event) }
+    }
+}
+
+final class VariantsPanel: NSObject {
+    private let panel: VariantsWindow
+    private let stack = NSStackView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private var variants: [String] = []
+    private var previousApp: NSRunningApplication?
+
+    override init() {
+        panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 200),
+                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        super.init()
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.onPick = { [weak self] i in self?.pick(i) }
+
+        // Объёмное стекло macOS: размытие фона, скруглённые края, тонкая светлая обводка.
+        let glass = NSVisualEffectView()
+        glass.material = .hudWindow
+        glass.blendingMode = .behindWindow
+        glass.state = .active
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = 18
+        glass.layer?.borderWidth = 1
+        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        glass.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.textColor = .secondaryLabelColor
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSStackView(views: [titleLabel, stack])
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 10
+        root.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.contentView = glass
+        glass.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.topAnchor.constraint(equalTo: glass.topAnchor),
+            root.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
+            root.bottomAnchor.constraint(equalTo: glass.bottomAnchor),
+        ])
+    }
+
+    func show(style: String, variants: [String]) {
+        self.variants = variants
+        previousApp = NSWorkspace.shared.frontmostApplication
+        titleLabel.stringValue = (style.isEmpty ? "Варианты" : "Варианты · \(style)") + "  ·  1–\(variants.count) или клик, Esc — отмена"
+        for v in stack.arrangedSubviews { v.removeFromSuperview() }
+        for (i, text) in variants.enumerated() {
+            stack.addArrangedSubview(makeRow(index: i, text: text))
+        }
+
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let width: CGFloat = min(620, visible.width - 80)
+        panel.setContentSize(NSSize(width: width, height: 200))
+        let size = panel.contentView!.fittingSize
+        let h = max(size.height, 120)
+        panel.setFrame(NSRect(x: visible.midX - width / 2, y: visible.minY + 80, width: width, height: h), display: true)
+        // Мягкое появление: плашка-капля растворяется, блок проступает и чуть подрастает.
+        panel.alphaValue = 0
+        panel.contentView?.layer?.setAffineTransform(CGAffineTransform(scaleX: 0.96, y: 0.96))
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.28
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.contentView?.layer?.setAffineTransform(.identity)
+        }
+    }
+
+    private func makeRow(index: Int, text: String) -> NSView {
+        let row = ClickableRow()
+        row.onClick = { [weak self] in self?.pick(index) }
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 10
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let badge = NSTextField(labelWithString: "\(index + 1)")
+        badge.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        badge.textColor = .white
+        badge.alignment = .center
+        badge.wantsLayer = true
+        badge.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
+        badge.layer?.cornerRadius = 9
+        badge.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        badge.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .labelColor
+        label.preferredMaxLayoutWidth = 520
+        let h = NSStackView(views: [badge, label])
+        h.orientation = .horizontal
+        h.alignment = .top
+        h.spacing = 10
+        h.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(h)
+        NSLayoutConstraint.activate([
+            h.topAnchor.constraint(equalTo: row.topAnchor, constant: 8),
+            h.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -8),
+            h.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
+            h.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
+            row.widthAnchor.constraint(equalToConstant: 540),
+        ])
+        return row
+    }
+
+    private func pick(_ i: Int) {
+        guard i >= 0, i < variants.count else { return }
+        let text = variants[i]
+        let cfg = App.shared.config
+        panel.close()
+        previousApp?.activate(options: [])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            typeQueue.async { typeText(text, config: cfg) }
+        }
+    }
+}
+
+/// Строка, реагирующая на клик и подсвечивающаяся под курсором.
+final class ClickableRow: NSView {
+    var onClick: (() -> Void)?
+    private var tracking: NSTrackingArea?
+    override func mouseUp(with event: NSEvent) { onClick?() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseEntered(with event: NSEvent) { layer?.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor }
+    override func mouseExited(with event: NSEvent) { layer?.backgroundColor = .clear }
+}
 
 // MARK: - Окно ответа («ответь, …»)
 
