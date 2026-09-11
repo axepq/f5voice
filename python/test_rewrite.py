@@ -265,5 +265,41 @@ class SplitAnswer(unittest.TestCase):
         self.assertEqual(msgs[1]["content"], "что такое DNS")
 
 
+class Variants(unittest.TestCase):
+    """«Предложи варианты» в конце — показать выбор; слово «вариант» внутри речи не трогаем."""
+
+    def test_verb_form_anywhere_at_end(self):
+        for tail in ("Предложи варианты.", "покажи варианты", "дай варианты", "давай варианты"):
+            body, want = rewrite.strip_variants("Напиши Амиру про долг. " + tail)
+            self.assertTrue(want, tail)
+            self.assertEqual(body, "Напиши Амиру про долг.", tail)
+
+    def test_bare_word_only_as_own_sentence(self):
+        body, want = rewrite.strip_variants("Текст письма. Варианты.")
+        self.assertEqual((body, want), ("Текст письма.", True))
+        for plain in ("Я не понял в чём вариант вопроса", "Мы обсудили варианты доставки"):
+            self.assertEqual(rewrite.strip_variants(plain), (plain, False), plain)
+
+    def test_without_text_is_plain_speech(self):
+        self.assertEqual(rewrite.strip_variants("Предложи варианты"), ("Предложи варианты", False))
+
+    def test_combines_with_style(self):
+        body, want = rewrite.strip_variants("Отчёт готов. Стиль агрессивный, дай варианты.")
+        self.assertTrue(want)
+        _, cmd = rewrite.split_command(body)
+        self.assertEqual(cmd["key"], "aggressive")
+
+    def test_messages_ask_for_json(self):
+        msgs = rewrite.build_variants_messages("текст", rewrite.DEFAULT_VARIANT_COMMAND, count=3)
+        self.assertIn("JSON", msgs[1]["content"])
+        self.assertIn("3", msgs[1]["content"])
+
+    def test_parse_json_and_fallbacks(self):
+        self.assertEqual(rewrite.parse_variants('["раз", "два", "три"]'), ["раз", "два", "три"])
+        self.assertEqual(rewrite.parse_variants('Вот варианты:\n["раз", "два"]'), ["раз", "два"])
+        self.assertEqual(rewrite.parse_variants("1. раз\n2. два\n3. три"), ["раз", "два", "три"])
+        self.assertEqual(rewrite.parse_variants(""), [])
+
+
 if __name__ == "__main__":
     unittest.main()

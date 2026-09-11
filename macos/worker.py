@@ -23,6 +23,9 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
   <- {"status": "answer", "command": "что такое DNS"}         фраза начиналась с «ответь»
   <- {"text": "", "question": "что такое DNS", "answer": "…", "answer_sec": 6.1}
   <- {"text": "", "question": "…", "answer_error": "…"}
+  <- {"status": "variants", "command": "официально"}            просили «предложи варианты»
+  <- {"text": "", "variants": ["…","…","…"], "style": "…", "body": "исходник"}
+  <- {"text": "", "variants_error": "…"}
   <- {"text": "Привет", "lang": "ru", "scores": {"ru": 0.99, "en": 0.01}, "fixed": 0, "dur": 2.1, "sec": 0.8,
       "rewrite": "official", "rewrite_sec": 3.2}            rewrite_* — только при команде
   <- {"text": "…исходник без команды…", "rewrite": "official", "rewrite_error": "…"}
@@ -314,7 +317,30 @@ def main():
                 last_use = time.time()
                 continue
             active = rw["enabled"] and (use_api(rw) or rw["model"])
-            body, cmd = rewrite.split_command(text, rw["commands"], rw["keyword"]) if active else (text, None)
+            want_variants = False
+            if active:
+                text2, want_variants = rewrite.strip_variants(text)
+                body, cmd = rewrite.split_command(text2, rw["commands"], rw["keyword"])
+            else:
+                body, cmd = text, None
+            if want_variants and use_api(rw):  # показать несколько вариантов вместо вставки
+                vcmd = cmd or rewrite.DEFAULT_VARIANT_COMMAND
+                out({"status": "variants", "command": vcmd["title"]})
+                log(f"варианты ({vcmd['key']}: {vcmd['title']}) ← {body[:200]}")
+                t2 = time.time()
+                try:
+                    raw = apillm.chat(rw["api_url"], rw["api_key"], rw["api_model"],
+                                      rewrite.build_variants_messages(body, vcmd), max_tokens=1200)
+                    variants = rewrite.parse_variants(raw)
+                    if not variants:
+                        raise ValueError("модель не вернула варианты")
+                    log(f"вариантов {len(variants)} за {time.time() - t2:.1f} с")
+                    out({"text": "", "variants": variants, "style": vcmd["title"], "body": body,
+                         "sec": round(time.time() - t1, 2)})
+                except Exception as e:  # noqa: BLE001
+                    out({"text": "", "variants_error": f"{type(e).__name__}: {e}"})
+                last_use = time.time()
+                continue
             if cmd:
                 text, extra = do_rewrite(llm, rw, body, cmd)
                 last_use = time.time()

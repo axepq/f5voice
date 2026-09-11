@@ -343,3 +343,67 @@ def build_answer_messages(question, persona=None):
                 {"role": "user", "content": f"Ответь {persona}. Вопрос: {question}"}]
     return [{"role": "system", "content": ANSWER_RULES},
             {"role": "user", "content": question}]
+
+
+# ---------------------------------------------------------------- варианты на выбор
+
+VARIANTS_COUNT = 3
+# «…текст. Предложи варианты» — просьба показать несколько вариантов вместо одной вставки.
+# С глаголом ловим где угодно в конце; голое «варианты» — только отдельным предложением,
+# иначе «в чём вариант вопроса» внутри диктовки ложно сработает.
+_VARIANTS_VERB = r"(?:предложи|предложить|покажи|показать|дай|давай|хочу|нужны)\s+"
+_VARIANTS_WORD = r"вариант(?:ы|ов|а)?"
+_VARIANTS_RX = re.compile(
+    r"(?:(?<=[.!?,;:…])\s*|\s+)" + _VARIANTS_VERB + _VARIANTS_WORD + _END
+    + r"|(?<=[.!?…])\s*" + _VARIANTS_WORD + _END, re.IGNORECASE)
+
+# Когда стиль не назван, варианты делаются в этой манере: просто хорошо и по-человечески.
+DEFAULT_VARIANT_COMMAND = {
+    "key": "compose", "title": "варианты", "rude": False,
+    "instruction": "Перепиши аккуратно и по-человечески: ясно донеси смысл, убери сбивчивость и воду, "
+                   "сохрани все факты и контекст.",
+}
+
+
+def strip_variants(text):
+    """(текст без просьбы о вариантах, просили ли варианты). Саму просьбу вырезаем из хвоста."""
+    text = (text or "").strip()
+    m = _VARIANTS_RX.search(text)
+    if not m:
+        return text, False
+    body = text[:m.start()].rstrip().rstrip(",;:")
+    if not body:
+        return text, False          # «Предложи варианты» без текста — это обычная речь
+    return body, True
+
+
+def build_variants_messages(text, cmd, count=VARIANTS_COUNT):
+    """Попросить у модели несколько разных вариантов одним запросом, ответ — JSON-массив строк."""
+    rules = RUDE_RULES if cmd.get("rude") else RULES
+    task = (f"{cmd['instruction']}\n\nДай ровно {count} разных варианта: они должны отличаться "
+            f"формулировками и подачей, но выполнять одну и ту же задачу. Верни только JSON-массив "
+            f"из {count} строк и ничего больше, например [\"первый\", \"второй\", \"третий\"].")
+    return [{"role": "system", "content": rules},
+            {"role": "user", "content": f"Задача: {task}\nТекст: {text}\nОтвет:"}]
+
+
+def parse_variants(raw, count=VARIANTS_COUNT):
+    """Ответ модели → список вариантов. JSON-массив, иначе строки или нумерованный список."""
+    import json
+
+    t = humanize(raw)
+    start, end = t.find("["), t.rfind("]")
+    if start >= 0 and end > start:
+        try:
+            items = json.loads(t[start:end + 1])
+            got = [humanize(str(i)).strip() for i in items if str(i).strip()]
+            if got:
+                return got[:count]
+        except ValueError:
+            pass
+    lines = []
+    for line in t.splitlines():
+        line = re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", line).strip().strip('",')
+        if line:
+            lines.append(line)
+    return lines[:count]
