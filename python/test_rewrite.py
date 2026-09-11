@@ -270,24 +270,32 @@ class Variants(unittest.TestCase):
 
     def test_verb_form_anywhere_at_end(self):
         for tail in ("Предложи варианты.", "покажи варианты", "дай варианты", "давай варианты"):
-            body, want = rewrite.strip_variants("Напиши Амиру про долг. " + tail)
+            r = rewrite.strip_variants("Напиши Амиру про долг. " + tail); body, want = r[0], r[1]
             self.assertTrue(want, tail)
             self.assertEqual(body, "Напиши Амиру про долг.", tail)
 
     def test_bare_word_only_as_own_sentence(self):
-        body, want = rewrite.strip_variants("Текст письма. Варианты.")
-        self.assertEqual((body, want), ("Текст письма.", True))
+        r = rewrite.strip_variants("Текст письма. Варианты.")
+        self.assertEqual((r[0], r[1]), ("Текст письма.", True))
         for plain in ("Я не понял в чём вариант вопроса", "Мы обсудили варианты доставки"):
-            self.assertEqual(rewrite.strip_variants(plain), (plain, False), plain)
+            self.assertEqual(rewrite.strip_variants(plain)[:2], (plain, False), plain)
 
     def test_without_text_is_plain_speech(self):
-        self.assertEqual(rewrite.strip_variants("Предложи варианты"), ("Предложи варианты", False))
+        self.assertEqual(rewrite.strip_variants("Предложи варианты")[:2], ("Предложи варианты", False))
 
     def test_combines_with_style(self):
-        body, want = rewrite.strip_variants("Отчёт готов. Стиль агрессивный, дай варианты.")
+        body, want, _ = rewrite.strip_variants("Отчёт готов. Стиль агрессивный, дай варианты.")
         self.assertTrue(want)
         _, cmd = rewrite.split_command(body)
         self.assertEqual(cmd["key"], "aggressive")
+
+    def test_over_text_forces_rewrite(self):
+        _, want, over = rewrite.strip_variants("Привет меня зовут Алекс. Накинь варианты по существующему тексту.")
+        self.assertTrue(want)
+        self.assertTrue(over)
+        _, want2, over2 = rewrite.strip_variants("Нужно письмо про сотрудничество. Предложи варианты.")
+        self.assertTrue(want2)
+        self.assertFalse(over2)
 
     def test_messages_ask_for_json(self):
         msgs = rewrite.build_variants_messages("текст", rewrite.DEFAULT_VARIANT_COMMAND, count=3)

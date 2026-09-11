@@ -319,12 +319,12 @@ def main():
             active = rw["enabled"] and (use_api(rw) or rw["model"])
             want_variants = False
             if active:
-                text2, want_variants = rewrite.strip_variants(text)
+                text2, want_variants, over_text = rewrite.strip_variants(text)
                 body, cmd = rewrite.split_command(text2, rw["commands"], rw["keyword"])
             else:
-                body, cmd = text, None
+                body, cmd, over_text = text, None, False
             if want_variants and use_api(rw):  # показать несколько вариантов вместо вставки
-                vcmd = cmd or rewrite.DEFAULT_VARIANT_COMMAND
+                vcmd = cmd or (rewrite.REWRITE_VARIANT_COMMAND if over_text else rewrite.DEFAULT_VARIANT_COMMAND)
                 out({"status": "variants", "command": vcmd["title"]})
                 log(f"варианты ({vcmd['key']}: {vcmd['title']}) ← {body[:200]}")
                 t2 = time.time()
