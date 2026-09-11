@@ -1725,7 +1725,8 @@ final class VariantsPanel: NSObject {
     private let root = NSStackView()
     private var scrollHeight: NSLayoutConstraint!
     private var rowWidth: CGFloat = 600
-    private let sheen = GlassSheen()
+    private let sheenTop = CAGradientLayer()   // верхний световой блик — сублой самого стекла
+    private let rimLayer = CALayer()           // светлая кромка — сублой самого стекла
     private var glassView: NSView!          // внутреннее стекло — анимируем его фрейм (капля -> блок)
     private var keyMonitor: Any?
     private(set) var variantTexts: [String] = []
@@ -1819,8 +1820,17 @@ final class VariantsPanel: NSObject {
         glassView.layer?.shadowOpacity = 0.32
         glassView.layer?.shadowRadius = 20
         glassView.layer?.shadowOffset = CGSize(width: 0, height: -8)
-        sheen.wantsLayer = true
-        container.addSubview(sheen)
+        // Блик и кромка — сублоями самого стекла: двигаются и тянутся как единое целое (без второго кружка).
+        sheenTop.colors = [NSColor(white: 1, alpha: 0.30).cgColor, NSColor(white: 1, alpha: 0.06).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
+        sheenTop.locations = [0, 0.16, 0.46]
+        sheenTop.startPoint = CGPoint(x: 0.5, y: 1); sheenTop.endPoint = CGPoint(x: 0.5, y: 0)
+        sheenTop.cornerRadius = 28
+        sheenTop.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        rimLayer.cornerRadius = 28
+        rimLayer.borderWidth = 1; rimLayer.borderColor = NSColor(white: 1, alpha: 0.20).cgColor
+        rimLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        glassView.layer?.addSublayer(sheenTop)
+        glassView.layer?.addSublayer(rimLayer)
         panel.contentView = container
     }
 
@@ -1853,59 +1863,66 @@ final class VariantsPanel: NSObject {
         // Оно неподвижно во время анимации; внутри растёт фрейм стекла — строго из центра.
         let win = NSRect(x: finalFrame.minX, y: visible.minY + 48,
                          width: finalFrame.width, height: finalFrame.maxY - (visible.minY + 48))
-        let drop: CGFloat = 56
         let blockLocal = NSRect(x: 0, y: win.height - h, width: win.width, height: h)
-        let pillLocal  = NSRect(x: (win.width - drop) / 2, y: 0, width: drop, height: drop)
-        let risenLocal = NSRect(x: (win.width - drop) / 2, y: blockLocal.midY - drop / 2, width: drop, height: drop)
-        func setGlass(_ r: NSRect) { glassView.frame = r; sheen.frame = r }
+        let cx = blockLocal.midX, cy = blockLocal.midY
+        func bead(_ w: CGFloat, _ hh: CGFloat, _ ccx: CGFloat, _ ccy: CGFloat) -> NSRect {
+            NSRect(x: ccx - w / 2, y: ccy - hh / 2, width: w, height: hh)
+        }
+        // Блик и кромка мгновенно подгоняются под текущую форму стекла (без своей анимации).
+        func syncSub() {
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            sheenTop.frame = glassView.bounds; rimLayer.frame = glassView.bounds
+            CATransaction.commit()
+        }
+        // Жидкий путь капли: вытянутая капля снизу -> подъём -> круг в центре -> перелив (шире-ниже)
+        // -> желейное оседание в блок. Так капля ведёт себя как жидкость, а не просто растёт.
+        let f0 = bead(42, 62, cx, 30)
+        let f1 = bead(48, 56, cx, (30 + cy) / 2)
+        let f2 = bead(58, 58, cx, cy)
+        let f3 = NSRect(x: blockLocal.minX - 12, y: blockLocal.minY + 16, width: blockLocal.width + 24, height: blockLocal.height - 32)
+        let f4 = blockLocal
+        func stepFrame(_ r: NSRect, _ dur: Double, _ tf: CAMediaTimingFunction, _ done: @escaping () -> Void) {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = dur; ctx.timingFunction = tf
+                self.glassView.animator().frame = r
+            }, completionHandler: { syncSub(); done() })
+        }
 
         let already = panel.isVisible
         if !already {
             panel.setFrame(win, display: false)          // окно фиксировано на весь путь
-            setGlass(pillLocal)                           // старт: круглая капля внизу по центру
+            glassView.frame = f0; syncSub()               // старт: вытянутая капля внизу по центру
             panel.alphaValue = 0
             root.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             installKeyMonitor()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.28
+                ctx.duration = 0.26
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1                          // капля проявляется из плашки
             }
-            // Фаза 1 — капля медленно поднимается к центру, оставаясь круглой.
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.64
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 0.25, 1)   // мягкий подъём
-                self.glassView.animator().frame = risenLocal
-                self.sheen.animator().frame = risenLocal
-            }, completionHandler: {
-                // Фаза 2 — капля плавно распускается в стеклянный блок из центра.
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.72
-                    ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.9, 0.18, 1)  // плавное распускание, мягкое оседание
-                    self.glassView.animator().frame = blockLocal
-                    self.sheen.animator().frame = blockLocal
-                }
-                // Текст проявляется по мере распускания — чтобы не сплющивался в капле.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                    NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.42
+            stepFrame(f1, 0.5, CAMediaTimingFunction(controlPoints: 0.3, 0.0, 0.35, 1)) {         // подъём
+                stepFrame(f2, 0.42, CAMediaTimingFunction(name: .easeOut)) {                       // собралась в круг
+                    stepFrame(f3, 0.34, CAMediaTimingFunction(controlPoints: 0.3, 0.7, 0.2, 1)) {  // перелив шире
+                        stepFrame(f4, 0.44, CAMediaTimingFunction(controlPoints: 0.5, -0.25, 0.35, 1)) {}  // желейное оседание
+                    }
+                    NSAnimationContext.runAnimationGroup { ctx in                                  // текст проявляется на распускании
+                        ctx.duration = 0.5
                         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                         self.root.animator().alphaValue = 1
                     }
                 }
-            })
+            }
         } else {
             // Правка открытого блока: окно и стекло на месте, только мягко подстраиваем размер.
             panel.setFrame(win, display: true)
             root.alphaValue = 1
-            NSAnimationContext.runAnimationGroup { ctx in
+            NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.24
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
                 self.glassView.animator().frame = blockLocal
-                self.sheen.animator().frame = blockLocal
-            }
+            }, completionHandler: { syncSub() })
         }
     }
 
