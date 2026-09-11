@@ -867,8 +867,10 @@ final class HUD {
         if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
             let glass = glassClass.init(frame: bounds)
             glass.setValue(25.0, forKey: "cornerRadius")
+            glass.setValue(content, forKey: "contentView")   // сначала контент — иначе стекло сбросит наши сублои
+            glass.autoresizingMask = [.width, .height]
             if style == "glass" {
-                // То же объёмное жидкое стекло, что у блока вариантов: чистый стиль + тёмный тон + блик и кромка.
+                // То же объёмное жидкое стекло, что у блока вариантов: чистый стиль + тёмный тон + блик и кромка ПОВЕРХ.
                 glass.setValue(1, forKey: "style")
                 glass.setValue(NSColor.black.withAlphaComponent(0.32), forKey: "tintColor")
                 addLiquidSheen(to: glass, cornerRadius: 25)
@@ -881,8 +883,6 @@ final class HUD {
                 if let tint = tints[style] ?? nil { glass.setValue(tint, forKey: "tintColor") }
                 if style == "clear" { glass.setValue(1, forKey: "style") }  // NSGlassEffectView.Style.clear
             }
-            glass.setValue(content, forKey: "contentView")
-            glass.autoresizingMask = [.width, .height]
             panel.contentView = glass
         } else {
             let fx = NSVisualEffectView(frame: bounds)
