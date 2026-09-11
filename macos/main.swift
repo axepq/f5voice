@@ -1861,9 +1861,12 @@ final class VariantsPanel: NSObject {
 
         // Окно охватывает весь путь капли: от плашки внизу (minY+48) до верха блока.
         // Оно неподвижно во время анимации; внутри растёт фрейм стекла — строго из центра.
-        let win = NSRect(x: finalFrame.minX, y: visible.minY + 48,
-                         width: finalFrame.width, height: finalFrame.maxY - (visible.minY + 48))
-        let blockLocal = NSRect(x: 0, y: win.height - h, width: win.width, height: h)
+        // Поля окна: бока и верх — чтобы разлив желе не обрезался о край окна.
+        let mx: CGFloat = 34, mtop: CGFloat = 50
+        let win = NSRect(x: finalFrame.minX - mx, y: visible.minY + 48,
+                         width: finalFrame.width + 2 * mx,
+                         height: (finalFrame.maxY - (visible.minY + 48)) + mtop)
+        let blockLocal = NSRect(x: mx, y: 48, width: finalFrame.width, height: h)
         let cx = blockLocal.midX, cy = blockLocal.midY
         func bead(_ w: CGFloat, _ hh: CGFloat, _ ccx: CGFloat, _ ccy: CGFloat) -> NSRect {
             NSRect(x: ccx - w / 2, y: ccy - hh / 2, width: w, height: hh)
@@ -1874,19 +1877,26 @@ final class VariantsPanel: NSObject {
             sheenTop.frame = glassView.bounds; rimLayer.frame = glassView.bounds
             CATransaction.commit()
         }
-        // Жидкий путь капли: вытянутая капля снизу -> подъём -> круг в центре -> перелив (шире-ниже)
-        // -> желейное оседание в блок. Так капля ведёт себя как жидкость, а не просто растёт.
-        let f0 = bead(42, 62, cx, 30)
-        let f1 = bead(48, 56, cx, (30 + cy) / 2)
-        let f2 = bead(58, 58, cx, cy)
-        let f3 = NSRect(x: blockLocal.minX - 12, y: blockLocal.minY + 16, width: blockLocal.width + 24, height: blockLocal.height - 32)
-        let f4 = blockLocal
+        // Жидкий путь (макс. желе, очень плавно): сильно вытянутая слеза снизу -> медленный подъём
+        // -> сбор в круг по центру -> сильный разлив шире блока -> длинное затухающее желе в блок.
+        let f0 = bead(30, 74, cx, 44)                      // сильно вытянутая слеза, у самого низа
+        let f1 = bead(38, 62, cx, cy * 0.55)               // поднимается, ещё слезой
+        let f2 = bead(60, 58, cx, cy)                      // собралась в круг по центру
+        func spill(_ dw: CGFloat, _ dh: CGFloat) -> NSRect {   // отклонение формы от блока: dw шире, dh выше
+            NSRect(x: blockLocal.minX - dw / 2, y: blockLocal.minY - dh / 2,
+                   width: blockLocal.width + dw, height: blockLocal.height + dh)
+        }
+        let f3 = spill(52, -52)                             // сильный разлив: заметно шире и ниже блока
+        // затухающее желе: чередуем «шире-ниже» и «уже-выше», амплитуда падает до блока
+        let jelly: [NSRect] = [spill(-42, 42), spill(30, -30), spill(-20, 20), spill(12, -12), spill(-5, 5), blockLocal]
+        let jellyDur: [Double] = [0.4, 0.36, 0.32, 0.3, 0.28, 0.26]
         func stepFrame(_ r: NSRect, _ dur: Double, _ tf: CAMediaTimingFunction, _ done: @escaping () -> Void) {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = dur; ctx.timingFunction = tf
                 self.glassView.animator().frame = r
             }, completionHandler: { syncSub(); done() })
         }
+        let smooth = CAMediaTimingFunction(name: .easeInEaseOut)
 
         let already = panel.isVisible
         if !already {
@@ -1898,17 +1908,21 @@ final class VariantsPanel: NSObject {
             NSApp.activate(ignoringOtherApps: true)
             installKeyMonitor()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.26
+                ctx.duration = 0.34
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1                          // капля проявляется из плашки
             }
-            stepFrame(f1, 0.5, CAMediaTimingFunction(controlPoints: 0.3, 0.0, 0.35, 1)) {         // подъём
-                stepFrame(f2, 0.42, CAMediaTimingFunction(name: .easeOut)) {                       // собралась в круг
-                    stepFrame(f3, 0.34, CAMediaTimingFunction(controlPoints: 0.3, 0.7, 0.2, 1)) {  // перелив шире
-                        stepFrame(f4, 0.44, CAMediaTimingFunction(controlPoints: 0.5, -0.25, 0.35, 1)) {}  // желейное оседание
+            func settle(_ i: Int) {                                       // затухающее желе -> блок
+                guard i < jelly.count else { return }
+                stepFrame(jelly[i], jellyDur[i], smooth) { settle(i + 1) }
+            }
+            stepFrame(f1, 0.9, smooth) {                     // медленный плавный подъём
+                stepFrame(f2, 0.72, smooth) {                // мягкий сбор в круг
+                    stepFrame(f3, 0.56, CAMediaTimingFunction(controlPoints: 0.25, 0.75, 0.2, 1)) {  // сильный разлив
+                        settle(0)
                     }
                     NSAnimationContext.runAnimationGroup { ctx in                                  // текст проявляется на распускании
-                        ctx.duration = 0.5
+                        ctx.duration = 0.6
                         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                         self.root.animator().alphaValue = 1
                     }
