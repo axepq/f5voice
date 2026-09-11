@@ -43,13 +43,13 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let modelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let termPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let otherPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let trailingBox = NSButton(checkboxWithTitle: "Ставить пробел после надиктованного текста", target: nil, action: nil)
-    private let autostartBox = NSButton(checkboxWithTitle: "Запускать при входе в систему", target: nil, action: nil)
-    private let fixCmdBox = NSButton(checkboxWithTitle: "Править окончания команд (сделаю → сделай)", target: nil, action: nil)
+    private let trailingBox = NSSwitch()
+    private let autostartBox = NSSwitch()
+    private let fixCmdBox = NSSwitch()
     private let micLabel = NSTextField(labelWithString: "")
     private let axLabel = NSTextField(labelWithString: "")
     // Переписывание и ответы
-    private let rewriteBox = NSButton(checkboxWithTitle: "Переписывать текст по команде в конце фразы", target: nil, action: nil)
+    private let rewriteBox = NSSwitch()
     private let providerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let keyField = NSSecureTextField(string: "")
     private let apiModelField = NSTextField(string: "")
@@ -64,6 +64,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private var hotkeySpecs: [String] = []
     private var timer: Timer?
     private var updating = false
+    private weak var scrollView: NSScrollView?
 
     init(app: App) {
         self.app = app
@@ -74,6 +75,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         window.title = "F5Voice"
         window.isReleasedWhenClosed = false
         window.delegate = self
+        // Стеклянное окно: прозрачный титлбар во всё содержимое — под матовым стеклом виден рабочий стол.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.styleMask.insert(.fullSizeContentView)
+        window.isOpaque = false
+        window.backgroundColor = .clear
         // Содержимое длиннее экрана ноутбука: кладём в прокрутку, окно не выше видимой области.
         let content = buildContent()
         let holder = FlippedView()
@@ -92,7 +99,21 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             content.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
             holder.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
         ])
-        window.contentView = scroll
+        let glassBG = NSVisualEffectView()
+        glassBG.material = .hudWindow
+        glassBG.blendingMode = .behindWindow
+        glassBG.state = .active
+        glassBG.appearance = NSAppearance(named: .darkAqua)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        glassBG.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: glassBG.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: glassBG.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: glassBG.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: glassBG.bottomAnchor),
+        ])
+        window.contentView = glassBG
+        scrollView = scroll
         let size = content.fittingSize
         let maxHeight = (NSScreen.main?.visibleFrame.height ?? 800) - 40
         window.setContentSize(NSSize(width: size.width, height: min(size.height, maxHeight)))
@@ -107,7 +128,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         refresh()
         NSApp.setActivationPolicy(.regular)
         if !window.isVisible { window.center() }
-        (window.contentView as? NSScrollView)?.contentView.scroll(to: .zero)  // всегда с шапки
+        scrollView?.contentView.scroll(to: .zero)  // всегда с шапки
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)  // без курсора в поле «Языки»: окно открылось, чтобы смотреть, а не печатать
         NSApp.activate(ignoringOtherApps: true)
@@ -128,6 +149,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         let l = NSTextField(labelWithString: text)
         l.alignment = .right
         l.textColor = .secondaryLabelColor
+        l.setContentCompressionResistancePriority(.required, for: .horizontal)  // не обрезать подписи
         return l
     }
 
@@ -135,6 +157,54 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         let l = NSTextField(labelWithString: text)
         l.font = .systemFont(ofSize: 13, weight: .semibold)
         return l
+    }
+
+    /// Строка-тумблер: переключатель слева, подпись справа (как в референсе glassmorphism).
+    private func toggleRow(_ sw: NSSwitch, _ title: String) -> NSView {
+        let l = NSTextField(labelWithString: title)
+        l.font = .systemFont(ofSize: 13)
+        l.lineBreakMode = .byWordWrapping
+        l.preferredMaxLayoutWidth = 380
+        let h = NSStackView(views: [sw, l])
+        h.spacing = 10
+        h.alignment = .centerY
+        return h
+    }
+
+    /// Полупрозрачная «карточка» с заголовком и содержимым — плавающий блок с глубиной.
+    private func card(_ title: String?, _ body: NSView) -> NSView {
+        let box = NSView()
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
+        box.layer?.cornerRadius = 16
+        box.layer?.cornerCurve = .continuous
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        box.shadow = NSShadow()
+        box.layer?.shadowColor = NSColor.black.cgColor
+        box.layer?.shadowOpacity = 0.18
+        box.layer?.shadowRadius = 14
+        box.layer?.shadowOffset = CGSize(width: 0, height: -3)
+        box.layer?.masksToBounds = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        if let title = title {
+            let t = NSTextField(labelWithString: title)
+            t.font = .systemFont(ofSize: 15, weight: .semibold)
+            stack.addArrangedSubview(t)
+        }
+        stack.addArrangedSubview(body)
+        box.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 18),
+            stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -18),
+            stack.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -18),
+        ])
+        return box
     }
 
     private func separator() -> NSView {
@@ -150,7 +220,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         icon.widthAnchor.constraint(equalToConstant: 72).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 72).isActive = true
         let title = NSTextField(labelWithString: "F5Voice")
-        title.font = .systemFont(ofSize: 24, weight: .bold)
+        title.font = .systemFont(ofSize: 28, weight: .bold)
         status.font = .systemFont(ofSize: 13)
         status.textColor = .secondaryLabelColor
         status.preferredMaxLayoutWidth = 420
@@ -241,9 +311,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             [label("В остальных программах"), otherPopup],
             [label("Скорость блока вариантов"), speedRow],
             [label("Желейность блока"), jellyRow],
-            [NSGridCell.emptyContentView, trailingBox],
-            [NSGridCell.emptyContentView, fixCmdBox],
-            [NSGridCell.emptyContentView, autostartBox],
+            [NSGridCell.emptyContentView, toggleRow(trailingBox, "Ставить пробел после надиктованного текста")],
+            [NSGridCell.emptyContentView, toggleRow(fixCmdBox, "Править окончания команд (сделаю → сделай)")],
+            [NSGridCell.emptyContentView, toggleRow(autostartBox, "Запускать при входе в систему")],
         ])
         form.rowSpacing = 10
         form.columnSpacing = 12
@@ -272,7 +342,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         keywordField.placeholderString = "команда"
         keywordField.toolTip = "«…текст. Команда: сделай списком» — после этого слова идёт своя инструкция модели"
         let aiForm = NSGridView(views: [
-            [NSGridCell.emptyContentView, rewriteBox],
+            [NSGridCell.emptyContentView, toggleRow(rewriteBox, "Переписывать текст по команде в конце фразы")],
             [label("Провайдер"), providerPopup],
             [label("Ключ API"), keyField],
             [label("Модель"), apiModelField],
@@ -377,15 +447,24 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         hint.textColor = .tertiaryLabelColor
         hint.preferredMaxLayoutWidth = 512
 
-        let root = NSStackView(views: [header, separator(), form,
-                                       separator(), section("Переписывание и ответы"), aiForm,
-                                       builtinTitle, builtinGrid, stylesTitle, stylesScroll, stylesBar, stylesHint,
-                                       separator(), section("Последние диктовки"), scroll, historyBar,
-                                       separator(), section("Разрешения"), perms, separator(), bar, hint])
+        let aiBody = NSStackView(views: [aiForm, builtinTitle, builtinGrid, stylesTitle, stylesScroll, stylesBar, stylesHint])
+        aiBody.orientation = .vertical; aiBody.alignment = .leading; aiBody.spacing = 12
+        let histBody = NSStackView(views: [scroll, historyBar])
+        histBody.orientation = .vertical; histBody.alignment = .leading; histBody.spacing = 10
+
+        let cardMain = card(nil, form)
+        let cardAI = card("Переписывание и ответы", aiBody)
+        let cardHist = card("Последние диктовки", histBody)
+        let cardPerms = card("Разрешения", perms)
+
+        let root = NSStackView(views: [header, cardMain, cardAI, cardHist, cardPerms, bar, hint])
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 14
-        root.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        root.spacing = 16
+        root.edgeInsets = NSEdgeInsets(top: 44, left: 24, bottom: 24, right: 24)  // верх — под кнопками окна
+        for c in [cardMain, cardAI, cardHist, cardPerms] {
+            c.widthAnchor.constraint(equalToConstant: 600).isActive = true
+        }
         return root
     }
 

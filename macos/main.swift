@@ -783,7 +783,7 @@ final class BarsView: NSView {
 
 /// Верхний световой блик и светлая кромка как сублои стекла — объёмное «жидкое стекло»
 /// (тот же приём, что у блока вариантов). Слои тянутся вместе со стеклом через autoresizing.
-func addLiquidSheen(to view: NSView, cornerRadius r: CGFloat) {
+func addLiquidSheen(to view: NSView, cornerRadius r: CGFloat, rim: Bool = true) {
     view.wantsLayer = true
     view.layer?.masksToBounds = false
     let top = CAGradientLayer()
@@ -793,13 +793,15 @@ func addLiquidSheen(to view: NSView, cornerRadius r: CGFloat) {
     top.cornerRadius = r
     top.frame = view.bounds
     top.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-    let rim = CALayer()
-    rim.cornerRadius = r
-    rim.borderWidth = 1; rim.borderColor = NSColor(white: 1, alpha: 0.20).cgColor
-    rim.frame = view.bounds
-    rim.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
     view.layer?.addSublayer(top)
-    view.layer?.addSublayer(rim)
+    if rim {                                   // светлая кромка — для стекла; у метала край рисует MetalRing
+        let edge = CALayer()
+        edge.cornerRadius = r
+        edge.borderWidth = 1; edge.borderColor = NSColor(white: 1, alpha: 0.20).cgColor
+        edge.frame = view.bounds
+        edge.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        view.layer?.addSublayer(edge)
+    }
 }
 
 final class HUD {
@@ -870,6 +872,11 @@ final class HUD {
                 glass.setValue(1, forKey: "style")
                 glass.setValue(NSColor.black.withAlphaComponent(0.32), forKey: "tintColor")
                 addLiquidSheen(to: glass, cornerRadius: 25)
+            } else if style == "metal" {
+                // Объёмное жидкое стекло + металлический край: чистое стекло, верхний блик, а кромку рисует MetalRing.
+                glass.setValue(1, forKey: "style")
+                glass.setValue(NSColor.black.withAlphaComponent(0.42), forKey: "tintColor")
+                addLiquidSheen(to: glass, cornerRadius: 25, rim: false)
             } else {
                 if let tint = tints[style] ?? nil { glass.setValue(tint, forKey: "tintColor") }
                 if style == "clear" { glass.setValue(1, forKey: "style") }  // NSGlassEffectView.Style.clear
