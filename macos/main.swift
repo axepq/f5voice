@@ -1726,6 +1726,7 @@ final class VariantsPanel: NSObject {
     private var scrollHeight: NSLayoutConstraint!
     private var rowWidth: CGFloat = 600
     private let sheen = GlassSheen()
+    private var glassView: NSView!          // внутреннее стекло — анимируем его фрейм (капля -> блок)
     private var keyMonitor: Any?
     private(set) var variantTexts: [String] = []
     private(set) var bodyText = ""
@@ -1742,7 +1743,7 @@ final class VariantsPanel: NSObject {
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false   // тень рисует само стекло (следует за формой капли)
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -1781,19 +1782,20 @@ final class VariantsPanel: NSObject {
 
         // Контейнер: снизу — стекло (настоящее Liquid Glass macOS 26, иначе размытие HUD),
         // сверху — тонкий световой блик и кромка (объём 3D), клики пропускает.
+        // Окно неподвижно во время анимации; из круга по центру наружу растёт ФРЕЙМ стекла —
+        // так капля появляется строго по центру и распускается из центра (а не «из угла окна»).
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 240))
         container.wantsLayer = true
         if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView(frame: container.bounds)
-            glass.autoresizingMask = [.width, .height]
+            let glass = NSGlassEffectView(frame: .zero)
             glass.cornerRadius = 28
             glass.setValue(1, forKey: "style")                         // clear — чистое прозрачное стекло (как в водах), а не морозное
             glass.tintColor = NSColor.black.withAlphaComponent(0.32)   // тёмное стекло — белый текст читается и на светлом фоне
             glass.contentView = root
             container.addSubview(glass)
+            glassView = glass
         } else {
-            let v = NSVisualEffectView(frame: container.bounds)
-            v.autoresizingMask = [.width, .height]
+            let v = NSVisualEffectView(frame: .zero)
             v.material = .hudWindow
             v.blendingMode = .behindWindow
             v.state = .active
@@ -1808,9 +1810,16 @@ final class VariantsPanel: NSObject {
                 root.bottomAnchor.constraint(equalTo: v.bottomAnchor),
             ])
             container.addSubview(v)
+            glassView = v
         }
-        sheen.frame = container.bounds
-        sheen.autoresizingMask = [.width, .height]
+        glassView.wantsLayer = true
+        glassView.layer?.masksToBounds = false
+        glassView.shadow = NSShadow()                       // мягкая тень по форме стекла — объём, следует за каплей
+        glassView.layer?.shadowColor = NSColor.black.cgColor
+        glassView.layer?.shadowOpacity = 0.32
+        glassView.layer?.shadowRadius = 20
+        glassView.layer?.shadowOffset = CGSize(width: 0, height: -8)
+        sheen.wantsLayer = true
         container.addSubview(sheen)
         panel.contentView = container
     }
@@ -1840,14 +1849,20 @@ final class VariantsPanel: NSObject {
         let h = (18 + titleH + 12 + scrollH + 18).rounded(.up)
         let finalFrame = NSRect(x: (visible.midX - width / 2).rounded(), y: visible.minY + 96, width: width, height: h)
 
+        // Окно охватывает весь путь капли: от плашки внизу (minY+48) до верха блока.
+        // Оно неподвижно во время анимации; внутри растёт фрейм стекла — строго из центра.
+        let win = NSRect(x: finalFrame.minX, y: visible.minY + 48,
+                         width: finalFrame.width, height: finalFrame.maxY - (visible.minY + 48))
+        let drop: CGFloat = 56
+        let blockLocal = NSRect(x: 0, y: win.height - h, width: win.width, height: h)
+        let pillLocal  = NSRect(x: (win.width - drop) / 2, y: 0, width: drop, height: drop)
+        let risenLocal = NSRect(x: (win.width - drop) / 2, y: blockLocal.midY - drop / 2, width: drop, height: drop)
+        func setGlass(_ r: NSRect) { glassView.frame = r; sheen.frame = r }
+
         let already = panel.isVisible
         if !already {
-            // Капля выходит из голосовой плашки (низ по центру): проявляется, медленно
-            // поднимается маленькой каплей к месту блока, затем плавно распускается в блок.
-            let dropW: CGFloat = 52, dropH: CGFloat = 64
-            let pill  = NSRect(x: visible.midX - dropW / 2, y: visible.minY + 48, width: dropW, height: dropH)
-            let risen = NSRect(x: finalFrame.midX - dropW / 2, y: finalFrame.midY - dropH / 2, width: dropW, height: dropH)
-            panel.setFrame(pill, display: false)
+            panel.setFrame(win, display: false)          // окно фиксировано на весь путь
+            setGlass(pillLocal)                           // старт: круглая капля внизу по центру
             panel.alphaValue = 0
             root.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
@@ -1858,17 +1873,19 @@ final class VariantsPanel: NSObject {
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1                          // капля проявляется из плашки
             }
-            // Фаза 1 — капля медленно поднимается, оставаясь маленькой.
+            // Фаза 1 — капля медленно поднимается к центру, оставаясь круглой.
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.62
+                ctx.duration = 0.64
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 0.25, 1)   // мягкий подъём
-                self.panel.animator().setFrame(risen, display: true)
+                self.glassView.animator().frame = risenLocal
+                self.sheen.animator().frame = risenLocal
             }, completionHandler: {
                 // Фаза 2 — капля плавно распускается в стеклянный блок из центра.
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.72
                     ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.9, 0.18, 1)  // плавное распускание, мягкое оседание
-                    self.panel.animator().setFrame(finalFrame, display: true)
+                    self.glassView.animator().frame = blockLocal
+                    self.sheen.animator().frame = blockLocal
                 }
                 // Текст проявляется по мере распускания — чтобы не сплющивался в капле.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
@@ -1880,11 +1897,14 @@ final class VariantsPanel: NSObject {
                 }
             })
         } else {
+            // Правка открытого блока: окно и стекло на месте, только мягко подстраиваем размер.
+            panel.setFrame(win, display: true)
+            root.alphaValue = 1
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.24
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
-                panel.animator().setFrame(finalFrame, display: true)
-                root.animator().alphaValue = 1
+                self.glassView.animator().frame = blockLocal
+                self.sheen.animator().frame = blockLocal
             }
         }
     }
@@ -2009,15 +2029,23 @@ final class GlassSheen: NSView {
     private let top = CAGradientLayer()
     private let rim = CALayer()
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func layout() {
-        super.layout()
-        if top.superlayer == nil { wantsLayer = true; layer?.addSublayer(top); layer?.addSublayer(rim) }
-        top.frame = bounds; top.cornerRadius = 28
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
         top.colors = [NSColor(white: 1, alpha: 0.22).cgColor, NSColor(white: 1, alpha: 0.05).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
         top.locations = [0, 0.14, 0.4]
         top.startPoint = CGPoint(x: 0.5, y: 1); top.endPoint = CGPoint(x: 0.5, y: 0)
-        rim.frame = bounds; rim.cornerRadius = 28
+        top.cornerRadius = 28
+        top.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]   // тянется со стеклом во время анимации
+        rim.cornerRadius = 28
         rim.borderWidth = 1; rim.borderColor = NSColor(white: 1, alpha: 0.16).cgColor
+        rim.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer?.addSublayer(top); layer?.addSublayer(rim)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() {
+        super.layout()
+        top.frame = bounds; rim.frame = bounds
     }
 }
 
