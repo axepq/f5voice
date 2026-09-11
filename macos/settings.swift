@@ -45,6 +45,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let otherPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let trailingBox = NSButton(checkboxWithTitle: "Ставить пробел после надиктованного текста", target: nil, action: nil)
     private let autostartBox = NSButton(checkboxWithTitle: "Запускать при входе в систему", target: nil, action: nil)
+    private let fixCmdBox = NSButton(checkboxWithTitle: "Править окончания команд (сделаю → сделай)", target: nil, action: nil)
     private let micLabel = NSTextField(labelWithString: "")
     private let axLabel = NSTextField(labelWithString: "")
     // Переписывание и ответы
@@ -53,6 +54,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let keyField = NSSecureTextField(string: "")
     private let apiModelField = NSTextField(string: "")
     private let keywordField = NSTextField(string: "")
+    private let speedSlider = NSSlider(value: 1.3, minValue: 0.6, maxValue: 2.0, target: nil, action: nil)
+    private let jellySlider = NSSlider(value: 0.4, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
+    private let speedValue = NSTextField(labelWithString: "")
+    private let jellyValue = NSTextField(labelWithString: "")
     private let stylesTable = NSTableView()
     private var styles: [(triggers: String, instruction: String)] = []
     private var whisperModelChoices: [String] = []   // модели распознавания в порядке пунктов modelPopup
@@ -208,6 +213,23 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         trailingBox.action = #selector(trailingChanged)
         autostartBox.target = self
         autostartBox.action = #selector(autostartChanged)
+        fixCmdBox.target = self
+        fixCmdBox.action = #selector(fixCmdChanged)
+        fixCmdBox.toolTip = "Whisper часто слышит команду как «сделаю» вместо «сделай». Не трогает 1-е лицо после «я/мы/…». В обычных сообщениях лучше выключить"
+
+        for s in [speedSlider, jellySlider] {
+            s.target = self
+            s.action = #selector(variantsAnimChanged)
+            s.isContinuous = false                       // сохраняем на отпускании, не 30 раз в секунду
+            s.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        }
+        speedSlider.toolTip = "Скорость превращения капли в блок вариантов (правее — быстрее)"
+        jellySlider.toolTip = "Желейность оседания блока (левее — почти без колыхания, правее — максимум)"
+        for v in [speedValue, jellyValue] { v.textColor = .secondaryLabelColor; v.font = .systemFont(ofSize: 12) }
+        let showVariants = NSButton(title: "Показать блок", target: self, action: #selector(previewVariants))
+        showVariants.toolTip = "Открыть блок вариантов с примером — крутите ползунки и сразу смотрите, без диктовки (Esc — закрыть)"
+        let speedRow = NSStackView(views: [speedSlider, speedValue]); speedRow.spacing = 8
+        let jellyRow = NSStackView(views: [jellySlider, jellyValue, showVariants]); jellyRow.spacing = 8
 
         let form = NSGridView(views: [
             [label("Сочетание клавиш"), hotkeyRow],
@@ -217,7 +239,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             [label("Модель"), modelPopup],
             [label("Перенос строки в терминале"), termPopup],
             [label("В остальных программах"), otherPopup],
+            [label("Скорость блока вариантов"), speedRow],
+            [label("Желейность блока"), jellyRow],
             [NSGridCell.emptyContentView, trailingBox],
+            [NSGridCell.emptyContentView, fixCmdBox],
             [NSGridCell.emptyContentView, autostartBox],
         ])
         form.rowSpacing = 10
@@ -387,7 +412,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         modelPopup.selectItem(at: whisperChoices.firstIndex(of: c.model) ?? 0)
         termPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineInTerminals } ?? 0)
         otherPopup.selectItem(at: newlineNames.firstIndex { $0.0 == c.newlineElsewhere } ?? 1)
+        speedSlider.doubleValue = c.variantsSpeed
+        jellySlider.doubleValue = c.variantsJelly
+        updateVariantsLabels()
         trailingBox.state = c.trailingSpace ? .on : .off
+        fixCmdBox.state = c.fixCommandEndings ? .on : .off
         rewriteBox.state = c.rewriteEnabled ? .on : .off
         providerPopup.selectItem(at: rewriteProviders.firstIndex { $0.id == c.rewriteApiProvider } ?? 0)
         if keyField.currentEditor() == nil { keyField.stringValue = c.rewriteApiKey }
@@ -571,6 +600,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
 
     @objc private func previewStyle() { app.previewHUD() }
 
+    @objc private func previewVariants() { app.previewVariants() }
+
+    @objc private func variantsAnimChanged() {
+        guard !updating else { return }
+        app.apply(["variants_speed": speedSlider.doubleValue, "variants_jelly": jellySlider.doubleValue])
+        updateVariantsLabels()
+    }
+
+    private func updateVariantsLabels() {
+        speedValue.stringValue = String(format: "×%.2f", speedSlider.doubleValue)
+        jellyValue.stringValue = String(format: "%.0f%%", jellySlider.doubleValue * 100)
+    }
+
     @objc private func fieldChanged() { commitFields() }
 
     func controlTextDidEndEditing(_ obj: Notification) { commitFields() }
@@ -597,6 +639,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     @objc private func trailingChanged() {
         guard !updating else { return }
         app.apply(["trailing_space": trailingBox.state == .on])
+    }
+
+    @objc private func fixCmdChanged() {
+        guard !updating else { return }
+        app.apply(["fix_command_endings": fixCmdBox.state == .on])
     }
 
     /// Выключено — служба доживает до выхода из системы и больше не стартует; включено — стартует при входе

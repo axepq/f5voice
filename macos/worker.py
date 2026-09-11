@@ -52,7 +52,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from common.audio_io import load_audio  # noqa: E402
 from common.segments import assemble  # noqa: E402
-from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
+from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize, fix_command_endings  # noqa: E402
 from common.vad import is_silence  # noqa: E402
 from common import history  # noqa: E402
 from common import rewrite  # noqa: E402
@@ -128,6 +128,15 @@ def rewrite_settings():
             "api_key": str(cfg.get("rewrite_api_key") or ""),
             "api_model": str(cfg.get("rewrite_api_model") or ""),
             "enabled": bool(cfg.get("rewrite_enabled", True))}
+
+
+def fix_cmd_enabled():
+    """Флаг «править окончания команд» из config.json (по умолчанию выкл)."""
+    try:
+        with open(HOME_DIR / "config.json", encoding="utf-8") as f:
+            return bool(json.load(f).get("fix_command_endings", False))
+    except (OSError, ValueError):
+        return False
 
 
 def use_api(rw):
@@ -230,7 +239,10 @@ def main():
 
         may_fix = lang == LANGS[0] and scores.get("en", 0.0) < 0.6
         text, fixed = assemble(segs, duration, redecode if may_fix else None)
-        return finalize(text, PROMPT), lang, scores, fixed
+        out_text = finalize(text, PROMPT)
+        if fix_cmd_enabled():
+            out_text = fix_command_endings(out_text)
+        return out_text, lang, scores, fixed
 
     t0 = time.time()
     warm = np.zeros(RATE, dtype=np.float32)

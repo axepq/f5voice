@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common.audio_io import load_audio, resample  # noqa: E402
 from common.segments import assemble  # noqa: E402
-from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize  # noqa: E402
+from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize, fix_command_endings  # noqa: E402
 from common.vad import is_silence  # noqa: E402
 from common import history  # noqa: E402
 
@@ -84,6 +84,7 @@ DEFAULTS = {
     "style": "dark",                   # dark | light | graphite — вид плашки (объёмная капсула с тенью)
     "cpu_threads": 0,                  # потоков для CTranslate2 на процессоре, 0 — по числу ядер
     "beam_size": 0,                    # ширина поиска, 0 — авто: 1 на процессоре (быстро), 5 на видеокарте
+    "fix_command_endings": False,      # чинить окончания команд, спутанные Whisper (сделаю→сделай)
 }
 
 
@@ -479,6 +480,7 @@ class Recognizer:
         self.langs = tuple(x.strip() for x in cfg["languages"].split(",") if x.strip()) or ("ru",)
         self.alt_min = float(cfg["alt_language_min_prob"])
         self.prompt = cfg["prompt"] or DEFAULT_PROMPT
+        self.fix_cmd = bool(cfg.get("fix_command_endings", False))
         # Сначала выбираем рабочий бэкенд (может переустановить ctranslate2), и только потом
         # импортируем библиотеку: загруженную DLL pip заменить не может, старая версия упала бы.
         device, compute_type = resolve_backend(cfg)
@@ -548,7 +550,10 @@ class Recognizer:
 
         may_fix = lang == self.langs[0] and scores.get("en", 0.0) < 0.6
         text, fixed = assemble(segs, duration, redecode if may_fix else None)
-        return finalize(text, self.prompt), lang, scores, fixed
+        out_text = finalize(text, self.prompt)
+        if self.fix_cmd:
+            out_text = fix_command_endings(out_text)
+        return out_text, lang, scores, fixed
 
 
 # ---------------------------------------------------------------- запись

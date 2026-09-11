@@ -84,6 +84,9 @@ struct Config {
     var newlineElsewhere = "shift"
     var style = "glass"                 // glass | metal | clear | dark
     var recordMode = "auto"             // auto — нажатие или удержание | toggle — только нажатие | hold — только удержание
+    var variantsSpeed = 1.3             // скорость превращения капли в блок (больше = быстрее)
+    var variantsJelly = 0.4             // желейность оседания (0 — почти без колыхания, 1 — максимум)
+    var fixCommandEndings = false       // чинить окончания команд, спутанные Whisper (сделаю→сделай)
     // Переписывание через облачный API (DeepSeek/Grok/…). Читает воркер из config.json; здесь — для окна настроек.
     var rewriteEnabled = true
     var rewriteApiProvider = "deepseek"
@@ -141,6 +144,9 @@ struct Config {
         if let v = obj["newline_elsewhere"] as? String { c.newlineElsewhere = v }
         if let v = obj["style"] as? String, !v.isEmpty { c.style = v }
         if let v = obj["record_mode"] as? String, ["auto", "toggle", "hold"].contains(v) { c.recordMode = v }
+        if let v = obj["variants_speed"] as? Double { c.variantsSpeed = min(max(v, 0.5), 2.5) }
+        if let v = obj["variants_jelly"] as? Double { c.variantsJelly = min(max(v, 0.0), 1.0) }
+        if let v = obj["fix_command_endings"] as? Bool { c.fixCommandEndings = v }
         if let v = obj["rewrite_model"] as? String { c.rewriteModel = v }
         if let v = obj["rewrite_enabled"] as? Bool { c.rewriteEnabled = v }
         if let v = obj["rewrite_api_provider"] as? String { c.rewriteApiProvider = v }
@@ -1189,6 +1195,19 @@ final class App: NSObject, NSApplicationDelegate {
         hud.show("Так выглядит плашка: \(title)", symbol: "sparkles", bars: .wave, animate: .variableColor, hideAfter: 3)
     }
 
+    /// Показать блок вариантов с примером — чтобы крутить скорость/желейность и сразу видеть, без диктовки.
+    func previewVariants() {
+        let sample = ["Привет, как твои дела?", "Здравствуй, как у тебя дела?", "Приветствую, как поживаешь?"]
+        if variantsPanel.isVisible {
+            variantsPanel.dismiss()                       // закрыть, чтобы проиграть анимацию заново
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                self.variantsPanel.show(style: "пример", body: "", variants: sample)
+            }
+        } else {
+            variantsPanel.show(style: "пример", body: "", variants: sample)
+        }
+    }
+
     @objc func captureHotkey() {
         capturing = true
         hud.show("Нажмите новое сочетание клавиш… Esc — отмена", symbol: "keyboard", tint: .systemYellow)
@@ -1736,6 +1755,8 @@ final class VariantsPanel: NSObject {
 
     var isVisible: Bool { panel.isVisible }
 
+    func dismiss() { panel.close() }   // закрыть блок (для повторного показа с анимацией)
+
     override init() {
         panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 240),
                                styleMask: [.borderless], backing: .buffered, defer: false)
@@ -1879,6 +1900,10 @@ final class VariantsPanel: NSObject {
         }
         // Жидкий путь (макс. желе, очень плавно): сильно вытянутая слеза снизу -> медленный подъём
         // -> сбор в круг по центру -> сильный разлив шире блока -> длинное затухающее желе в блок.
+        // Скорость и желейность — из настроек (пользователь крутит ползунками).
+        let cfg = App.shared.config
+        let sc = 1.0 / max(0.5, cfg.variantsSpeed)         // множитель длительностей: больше скорость -> меньше
+        let jK = cfg.variantsJelly                          // желейность 0..1
         let f0 = bead(30, 74, cx, 44)                      // сильно вытянутая слеза, у самого низа
         let f1 = bead(38, 62, cx, cy * 0.55)               // поднимается, ещё слезой
         let f2 = bead(60, 58, cx, cy)                      // собралась в круг по центру
@@ -1886,10 +1911,14 @@ final class VariantsPanel: NSObject {
             NSRect(x: blockLocal.minX - dw / 2, y: blockLocal.minY - dh / 2,
                    width: blockLocal.width + dw, height: blockLocal.height + dh)
         }
-        let f3 = spill(52, -52)                             // сильный разлив: заметно шире и ниже блока
-        // затухающее желе: чередуем «шире-ниже» и «уже-выше», амплитуда падает до блока
-        let jelly: [NSRect] = [spill(-42, 42), spill(30, -30), spill(-20, 20), spill(12, -12), spill(-5, 5), blockLocal]
-        let jellyDur: [Double] = [0.4, 0.36, 0.32, 0.3, 0.28, 0.26]
+        // Разлив и число колыханий растут с желейностью; при 0 — почти сразу в блок.
+        let spread = CGFloat(16 + 48 * jK)
+        let f3 = spill(spread, -spread)
+        let baseAmp: [CGFloat] = [-42, 30, -20, 12, -5]     // чередование шире/уже, падающая амплитуда
+        let steps = max(1, Int((1 + 5 * jK).rounded()))
+        let amp = CGFloat(0.5 + 0.5 * jK)
+        let jelly: [NSRect] = baseAmp.prefix(steps).map { spill($0 * amp, -$0 * amp) } + [blockLocal]
+        let jellyDur: [Double] = Array(repeating: 0.3 * sc, count: baseAmp.prefix(steps).count + 1)
         func stepFrame(_ r: NSRect, _ dur: Double, _ tf: CAMediaTimingFunction, _ done: @escaping () -> Void) {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = dur; ctx.timingFunction = tf
@@ -1916,13 +1945,13 @@ final class VariantsPanel: NSObject {
                 guard i < jelly.count else { return }
                 stepFrame(jelly[i], jellyDur[i], smooth) { settle(i + 1) }
             }
-            stepFrame(f1, 0.9, smooth) {                     // медленный плавный подъём
-                stepFrame(f2, 0.72, smooth) {                // мягкий сбор в круг
-                    stepFrame(f3, 0.56, CAMediaTimingFunction(controlPoints: 0.25, 0.75, 0.2, 1)) {  // сильный разлив
+            stepFrame(f1, 0.9 * sc, smooth) {                // плавный подъём
+                stepFrame(f2, 0.72 * sc, smooth) {           // мягкий сбор в круг
+                    stepFrame(f3, 0.56 * sc, CAMediaTimingFunction(controlPoints: 0.25, 0.75, 0.2, 1)) {  // разлив
                         settle(0)
                     }
                     NSAnimationContext.runAnimationGroup { ctx in                                  // текст проявляется на распускании
-                        ctx.duration = 0.6
+                        ctx.duration = 0.6 * sc
                         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                         self.root.animator().alphaValue = 1
                     }
