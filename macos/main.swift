@@ -1732,6 +1732,7 @@ final class VariantsPanel: NSObject {
 
     var isVisible: Bool { panel.isVisible }
     private let tint = CAGradientLayer()
+    private let glow = CAGradientLayer()       // блуждающий свет — «живое», текучее стекло
     private let sheen = CAGradientLayer()
     private let edge = CAGradientLayer()
 
@@ -1768,6 +1769,12 @@ final class VariantsPanel: NSObject {
         tint.startPoint = CGPoint(x: 0.5, y: 1); tint.endPoint = CGPoint(x: 0.5, y: 0)
         tint.cornerRadius = 26; tint.cornerCurve = .continuous
         glass.layer?.addSublayer(tint)
+        // Мягкий радиальный свет, который медленно течёт по стеклу — эффект жидкого стекла.
+        glow.type = .radial
+        glow.colors = [NSColor(calibratedRed: 0.62, green: 0.72, blue: 1.0, alpha: 0.22).cgColor,
+                       NSColor(calibratedRed: 0.62, green: 0.72, blue: 1.0, alpha: 0.0).cgColor]
+        glow.startPoint = CGPoint(x: 0.5, y: 0.5); glow.endPoint = CGPoint(x: 1, y: 1)
+        glass.layer?.addSublayer(glow)
         glass.shadow = NSShadow()
         if let sh = glass.shadow { sh.shadowBlurRadius = 44; sh.shadowOffset = NSSize(width: 0, height: -14); sh.shadowColor = NSColor.black.withAlphaComponent(0.55) }
         sheen.colors = [NSColor.white.withAlphaComponent(0.20).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
@@ -1856,13 +1863,35 @@ final class VariantsPanel: NSObject {
         tint.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
         sheen.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
         edge.frame = CGRect(x: 16, y: finalFrame.height - 1.5, width: finalFrame.width - 32, height: 1.5)
+        let blob = max(finalFrame.width, finalFrame.height) * 0.9
+        glow.bounds = CGRect(x: 0, y: 0, width: blob, height: blob)
+        glow.cornerRadius = blob / 2
         CATransaction.commit()
+        startGlow(in: finalFrame.size)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = already ? 0.2 : 0.36
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
             panel.animator().setFrame(finalFrame, display: true)
             panel.animator().alphaValue = 1
         }
+    }
+
+    /// Свет медленно ходит по эллипсу внутри блока, дыша яркостью — стекло кажется текучим.
+    private func startGlow(in size: CGSize) {
+        glow.removeAllAnimations()
+        let wander = CAKeyframeAnimation(keyPath: "position")
+        wander.path = CGPath(ellipseIn: CGRect(x: size.width * 0.22, y: size.height * 0.15,
+                                               width: size.width * 0.56, height: size.height * 0.7), transform: nil)
+        wander.duration = 11
+        wander.calculationMode = .paced
+        wander.repeatCount = .infinity
+        wander.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        glow.add(wander, forKey: "wander")
+        let breathe = CABasicAnimation(keyPath: "opacity")
+        breathe.fromValue = 0.7; breathe.toValue = 1.0
+        breathe.duration = 5.5; breathe.autoreverses = true; breathe.repeatCount = .infinity
+        breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        glow.add(breathe, forKey: "breathe")
     }
 
     private func installKeyMonitor() {
