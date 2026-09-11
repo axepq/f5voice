@@ -1722,6 +1722,7 @@ final class VariantsPanel: NSObject {
     private let stack = NSStackView()
     private let scroll = NSScrollView()
     private let titleLabel = NSTextField(labelWithString: "")
+    private let root = NSStackView()
     private var scrollHeight: NSLayoutConstraint!
     private var rowWidth: CGFloat = 600
     private var keyMonitor: Any?
@@ -1731,10 +1732,6 @@ final class VariantsPanel: NSObject {
     private var previousApp: NSRunningApplication?
 
     var isVisible: Bool { panel.isVisible }
-    private let tint = CAGradientLayer()
-    private let glow = CAGradientLayer()       // блуждающий свет — «живое», текучее стекло
-    private let sheen = CAGradientLayer()
-    private let edge = CAGradientLayer()
 
     override init() {
         panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 240),
@@ -1753,42 +1750,8 @@ final class VariantsPanel: NSObject {
             self?.removeKeyMonitor()
         }
 
-        let glass = NSVisualEffectView()
-        glass.material = .hudWindow
-        glass.blendingMode = .behindWindow
-        glass.state = .active
-        glass.wantsLayer = true
-        glass.layer?.cornerRadius = 26
-        glass.layer?.cornerCurve = .continuous
-        glass.layer?.borderWidth = 1
-        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
-        glass.translatesAutoresizingMaskIntoConstraints = false
-        // Тёмная стеклянная подложка: блок всегда тёмный и объёмный на любом фоне.
-        tint.colors = [NSColor(calibratedRed: 0.14, green: 0.15, blue: 0.19, alpha: 0.70).cgColor,
-                       NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.08, alpha: 0.82).cgColor]
-        tint.startPoint = CGPoint(x: 0.5, y: 1); tint.endPoint = CGPoint(x: 0.5, y: 0)
-        tint.cornerRadius = 26; tint.cornerCurve = .continuous
-        glass.layer?.addSublayer(tint)
-        // Мягкий радиальный свет, который медленно течёт по стеклу — эффект жидкого стекла.
-        glow.type = .radial
-        glow.colors = [NSColor(calibratedRed: 0.62, green: 0.72, blue: 1.0, alpha: 0.22).cgColor,
-                       NSColor(calibratedRed: 0.62, green: 0.72, blue: 1.0, alpha: 0.0).cgColor]
-        glow.startPoint = CGPoint(x: 0.5, y: 0.5); glow.endPoint = CGPoint(x: 1, y: 1)
-        glass.layer?.addSublayer(glow)
-        glass.shadow = NSShadow()
-        if let sh = glass.shadow { sh.shadowBlurRadius = 44; sh.shadowOffset = NSSize(width: 0, height: -14); sh.shadowColor = NSColor.black.withAlphaComponent(0.55) }
-        sheen.colors = [NSColor.white.withAlphaComponent(0.20).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
-        sheen.startPoint = CGPoint(x: 0.5, y: 1.0); sheen.endPoint = CGPoint(x: 0.5, y: 0.5)
-        sheen.cornerRadius = 26; sheen.cornerCurve = .continuous
-        glass.layer?.addSublayer(sheen)
-        edge.colors = [NSColor.white.withAlphaComponent(0.0).cgColor,
-                       NSColor.white.withAlphaComponent(0.55).cgColor,
-                       NSColor.white.withAlphaComponent(0.0).cgColor]
-        edge.startPoint = CGPoint(x: 0, y: 0.5); edge.endPoint = CGPoint(x: 1, y: 0.5)
-        glass.layer?.addSublayer(edge)
-
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        titleLabel.textColor = NSColor.white.withAlphaComponent(0.6)
+        titleLabel.textColor = NSColor.white.withAlphaComponent(0.72)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -1808,20 +1771,37 @@ final class VariantsPanel: NSObject {
             stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
         ])
 
-        let root = NSStackView(views: [titleLabel, scroll])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 12
+        root.setViews([titleLabel, scroll], in: .leading)
         root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
         root.translatesAutoresizingMaskIntoConstraints = false
-        panel.contentView = glass
-        glass.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.topAnchor.constraint(equalTo: glass.topAnchor),
-            root.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
-            root.bottomAnchor.constraint(equalTo: glass.bottomAnchor),
-        ])
+
+        // Настоящее стекло macOS 26 (Liquid Glass) — чистое прозрачное стекло; иначе размытие HUD.
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 28
+            glass.tintColor = NSColor.black.withAlphaComponent(0.26)   // лёгкое затемнение для читаемости белого текста
+            glass.contentView = root
+            panel.contentView = glass
+        } else {
+            let v = NSVisualEffectView()
+            v.material = .hudWindow
+            v.blendingMode = .behindWindow
+            v.state = .active
+            v.wantsLayer = true
+            v.layer?.cornerRadius = 28
+            v.layer?.cornerCurve = .continuous
+            v.addSubview(root)
+            NSLayoutConstraint.activate([
+                root.topAnchor.constraint(equalTo: v.topAnchor),
+                root.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+                root.trailingAnchor.constraint(equalTo: v.trailingAnchor),
+                root.bottomAnchor.constraint(equalTo: v.bottomAnchor),
+            ])
+            panel.contentView = v
+        }
     }
 
     func show(style: String, body: String, variants: [String]) {
@@ -1835,70 +1815,43 @@ final class VariantsPanel: NSObject {
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let width = min(720, visible.width - 80)
-        rowWidth = width - 40                    // минус боковые отступы root (20+20)
+        rowWidth = width - 40
 
         for v in stack.arrangedSubviews { v.removeFromSuperview() }
         for (i, text) in variants.enumerated() { stack.addArrangedSubview(makeRow(index: i, text: text)) }
-        stack.layoutSubtreeIfNeeded()            // разложить, чтобы высота учла перенос текста
+        stack.layoutSubtreeIfNeeded()
 
         let contentH = stack.fittingSize.height
         let maxScroll = visible.height * 0.62
         let scrollH = min(contentH, maxScroll).rounded(.up)
         scrollHeight.constant = scrollH
-        panel.layoutIfNeeded()
-        let h = panel.contentView!.fittingSize.height
-        let finalFrame = NSRect(x: (visible.midX - width / 2).rounded(), y: visible.minY + 90, width: width, height: h)
+        let titleH = titleLabel.intrinsicContentSize.height
+        let h = (18 + titleH + 12 + scrollH + 18).rounded(.up)
+        let finalFrame = NSRect(x: (visible.midX - width / 2).rounded(), y: visible.minY + 96, width: width, height: h)
 
         let already = panel.isVisible
         if !already {
-            let pill = NSRect(x: visible.midX - 160, y: visible.minY + 90, width: 320, height: 56)
-            panel.setFrame(pill, display: false)
+            // Капля поднимается из плашки: старт маленькой каплей у низа, подъём и разворот в блок.
+            let drop = NSRect(x: visible.midX - 90, y: visible.minY + 24, width: 180, height: 46)
+            panel.setFrame(drop, display: false)
             panel.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             installKeyMonitor()
         }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        tint.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
-        sheen.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
-        edge.frame = CGRect(x: 16, y: finalFrame.height - 1.5, width: finalFrame.width - 32, height: 1.5)
-        let blob = max(finalFrame.width, finalFrame.height) * 0.9
-        glow.bounds = CGRect(x: 0, y: 0, width: blob, height: blob)
-        glow.cornerRadius = blob / 2
-        CATransaction.commit()
-        startGlow(in: finalFrame.size)
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = already ? 0.2 : 0.36
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
+            ctx.duration = already ? 0.22 : 0.42
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)   // мягкий текучий выкат
             panel.animator().setFrame(finalFrame, display: true)
             panel.animator().alphaValue = 1
         }
-    }
-
-    /// Свет медленно ходит по эллипсу внутри блока, дыша яркостью — стекло кажется текучим.
-    private func startGlow(in size: CGSize) {
-        glow.removeAllAnimations()
-        let wander = CAKeyframeAnimation(keyPath: "position")
-        wander.path = CGPath(ellipseIn: CGRect(x: size.width * 0.22, y: size.height * 0.15,
-                                               width: size.width * 0.56, height: size.height * 0.7), transform: nil)
-        wander.duration = 11
-        wander.calculationMode = .paced
-        wander.repeatCount = .infinity
-        wander.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glow.add(wander, forKey: "wander")
-        let breathe = CABasicAnimation(keyPath: "opacity")
-        breathe.fromValue = 0.7; breathe.toValue = 1.0
-        breathe.duration = 5.5; breathe.autoreverses = true; breathe.repeatCount = .infinity
-        breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glow.add(breathe, forKey: "breathe")
     }
 
     private func installKeyMonitor() {
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self, self.panel.isVisible else { return event }
-            if event.keyCode == 53 { self.panel.close(); return nil }              // Esc
+            if event.keyCode == 53 { self.panel.close(); return nil }
             if let n = Int(event.charactersIgnoringModifiers ?? ""), n >= 1, n <= self.variantTexts.count {
                 self.pick(n - 1); return nil
             }
@@ -1933,7 +1886,7 @@ final class VariantsPanel: NSObject {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = .systemFont(ofSize: 13.5)
         label.textColor = .white
-        label.preferredMaxLayoutWidth = rowWidth - 20 - 22 - 12 - 20   // отступы строки + бейдж + зазор
+        label.preferredMaxLayoutWidth = rowWidth - 20 - 22 - 12 - 20
         let h = NSStackView(views: [badge, label])
         h.orientation = .horizontal
         h.alignment = .top
