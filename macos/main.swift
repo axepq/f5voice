@@ -1713,32 +1713,31 @@ let application = NSApplication.shared
 /// Стеклянный блок внизу экрана с несколькими вариантами переписанного текста.
 /// Цифра 1–3 или клик выбирают вариант и печатают его туда, где вы были; Esc закрывает.
 final class VariantsWindow: NSPanel {
-    var onPick: ((Int) -> Void)?
-    override var canBecomeKey: Bool { true }            // без этого не ловим цифры и Esc
+    override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { close() }
-    override func keyDown(with event: NSEvent) {
-        if let n = Int(event.charactersIgnoringModifiers ?? ""), n >= 1 { onPick?(n - 1) }
-        else { super.keyDown(with: event) }
-    }
 }
 
 final class VariantsPanel: NSObject {
     private let panel: VariantsWindow
     private let stack = NSStackView()
+    private let scroll = NSScrollView()
     private let titleLabel = NSTextField(labelWithString: "")
+    private var scrollHeight: NSLayoutConstraint!
+    private var rowWidth: CGFloat = 600
+    private var keyMonitor: Any?
     private(set) var variantTexts: [String] = []
     private(set) var bodyText = ""
     private(set) var styleText = ""
     private var previousApp: NSRunningApplication?
 
     var isVisible: Bool { panel.isVisible }
-    private let tint = CAGradientLayer()       // тёмная подложка: стекло тёмное на любом фоне
-    private let sheen = CAGradientLayer()      // блик по стеклу сверху
-    private let edge = CAGradientLayer()       // световая кромка
+    private let tint = CAGradientLayer()
+    private let sheen = CAGradientLayer()
+    private let edge = CAGradientLayer()
 
     override init() {
-        panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 200),
-                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 240),
+                               styleMask: [.borderless], backing: .buffered, defer: false)
         super.init()
         panel.isFloatingPanel = true
         panel.level = .floating
@@ -1748,42 +1747,37 @@ final class VariantsPanel: NSObject {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.appearance = NSAppearance(named: .darkAqua)   // всегда тёмное стекло, чтобы блик и кромка играли
-        panel.onPick = { [weak self] i in self?.pick(i) }
+        panel.appearance = NSAppearance(named: .darkAqua)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel, queue: .main) { [weak self] _ in
+            self?.removeKeyMonitor()
+        }
 
-        // Объёмное тёмное стекло: размытие фона, крупное скругление, блик сверху и световая кромка.
         let glass = NSVisualEffectView()
         glass.material = .hudWindow
         glass.blendingMode = .behindWindow
         glass.state = .active
         glass.wantsLayer = true
-        glass.layer?.cornerRadius = 22
+        glass.layer?.cornerRadius = 26
         glass.layer?.cornerCurve = .continuous
         glass.layer?.borderWidth = 1
-        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
         glass.translatesAutoresizingMaskIntoConstraints = false
-        // Тёмная стеклянная подложка с лёгким вертикальным градиентом — объём и постоянный тёмный тон.
-        tint.colors = [NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.17, alpha: 0.72).cgColor,
-                       NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.07, alpha: 0.80).cgColor]
+        // Тёмная стеклянная подложка: блок всегда тёмный и объёмный на любом фоне.
+        tint.colors = [NSColor(calibratedRed: 0.14, green: 0.15, blue: 0.19, alpha: 0.70).cgColor,
+                       NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.08, alpha: 0.82).cgColor]
         tint.startPoint = CGPoint(x: 0.5, y: 1); tint.endPoint = CGPoint(x: 0.5, y: 0)
-        tint.cornerRadius = 22; tint.cornerCurve = .continuous
+        tint.cornerRadius = 26; tint.cornerCurve = .continuous
         glass.layer?.addSublayer(tint)
-        // Мягкая объёмная тень под блоком.
-        panel.contentView?.superview?.wantsLayer = true
         glass.shadow = NSShadow()
-        if let sh = glass.shadow { sh.shadowBlurRadius = 40; sh.shadowOffset = NSSize(width: 0, height: -12); sh.shadowColor = NSColor.black.withAlphaComponent(0.5) }
-        // Блик: белый глянец, стекающий сверху, придаёт объём.
-        sheen.colors = [NSColor.white.withAlphaComponent(0.22).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
-        sheen.startPoint = CGPoint(x: 0.5, y: 1.0)
-        sheen.endPoint = CGPoint(x: 0.5, y: 0.55)
-        sheen.cornerRadius = 22
-        sheen.cornerCurve = .continuous
-        sheen.colors = [NSColor.white.withAlphaComponent(0.16).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
+        if let sh = glass.shadow { sh.shadowBlurRadius = 44; sh.shadowOffset = NSSize(width: 0, height: -14); sh.shadowColor = NSColor.black.withAlphaComponent(0.55) }
+        sheen.colors = [NSColor.white.withAlphaComponent(0.20).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
+        sheen.startPoint = CGPoint(x: 0.5, y: 1.0); sheen.endPoint = CGPoint(x: 0.5, y: 0.5)
+        sheen.cornerRadius = 26; sheen.cornerCurve = .continuous
         glass.layer?.addSublayer(sheen)
-        // Светлая кромка по верхнему краю — как отблеск на грани стекла.
-        edge.colors = [NSColor.white.withAlphaComponent(0.5).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
-        edge.startPoint = CGPoint(x: 0, y: 0.5)
-        edge.endPoint = CGPoint(x: 1, y: 0.5)
+        edge.colors = [NSColor.white.withAlphaComponent(0.0).cgColor,
+                       NSColor.white.withAlphaComponent(0.55).cgColor,
+                       NSColor.white.withAlphaComponent(0.0).cgColor]
+        edge.startPoint = CGPoint(x: 0, y: 0.5); edge.endPoint = CGPoint(x: 1, y: 0.5)
         glass.layer?.addSublayer(edge)
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
@@ -1793,13 +1787,26 @@ final class VariantsPanel: NSObject {
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let root = NSStackView(views: [titleLabel, stack])
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.documentView = stack
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 160)
+        scrollHeight.isActive = true
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+        ])
+
+        let root = NSStackView(views: [titleLabel, scroll])
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 10
-        root.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
         root.translatesAutoresizingMaskIntoConstraints = false
-
         panel.contentView = glass
         glass.addSubview(root)
         NSLayoutConstraint.activate([
@@ -1816,47 +1823,69 @@ final class VariantsPanel: NSObject {
         self.bodyText = body
         if !panel.isVisible { previousApp = NSWorkspace.shared.frontmostApplication }
         titleLabel.stringValue = (style.isEmpty ? "Варианты" : "Варианты · \(style)")
-            + "  ·  1–\(variants.count) или клик · F5 — правка голосом · Esc — отмена"
-        for v in stack.arrangedSubviews { v.removeFromSuperview() }
-        for (i, text) in variants.enumerated() {
-            stack.addArrangedSubview(makeRow(index: i, text: text))
-        }
+            + "   ·   1–\(variants.count) или клик · F5 — правка голосом · Esc — отмена"
 
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
-        let width: CGFloat = min(620, visible.width - 80)
-        panel.setContentSize(NSSize(width: width, height: 200))
-        let size = panel.contentView!.fittingSize
-        let h = max(size.height, 120)
-        let finalFrame = NSRect(x: visible.midX - width / 2, y: visible.minY + 80, width: width, height: h)
+        let width = min(720, visible.width - 80)
+        rowWidth = width - 40                    // минус боковые отступы root (20+20)
+
+        for v in stack.arrangedSubviews { v.removeFromSuperview() }
+        for (i, text) in variants.enumerated() { stack.addArrangedSubview(makeRow(index: i, text: text)) }
+        stack.layoutSubtreeIfNeeded()            // разложить, чтобы высота учла перенос текста
+
+        let contentH = stack.fittingSize.height
+        let maxScroll = visible.height * 0.62
+        let scrollH = min(contentH, maxScroll).rounded(.up)
+        scrollHeight.constant = scrollH
+        panel.layoutIfNeeded()
+        let h = panel.contentView!.fittingSize.height
+        let finalFrame = NSRect(x: (visible.midX - width / 2).rounded(), y: visible.minY + 90, width: width, height: h)
+
         let already = panel.isVisible
         if !already {
-            // Морфинг из капли: старт узкой пилюлей на месте плашки, затем разворот в блок.
-            let pill = NSRect(x: visible.midX - 150, y: visible.minY + 80, width: 300, height: 54)
+            let pill = NSRect(x: visible.midX - 160, y: visible.minY + 90, width: 320, height: 56)
             panel.setFrame(pill, display: false)
             panel.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            installKeyMonitor()
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         tint.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
         sheen.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
-        edge.frame = CGRect(x: 12, y: finalFrame.height - 1.5, width: finalFrame.width - 24, height: 1.5)
+        edge.frame = CGRect(x: 16, y: finalFrame.height - 1.5, width: finalFrame.width - 32, height: 1.5)
         CATransaction.commit()
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = already ? 0.2 : 0.34
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)  // мягкий «выкат»
+            ctx.duration = already ? 0.2 : 0.36
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
             panel.animator().setFrame(finalFrame, display: true)
             panel.animator().alphaValue = 1
         }
+    }
+
+    private func installKeyMonitor() {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, self.panel.isVisible else { return event }
+            if event.keyCode == 53 { self.panel.close(); return nil }              // Esc
+            if let n = Int(event.charactersIgnoringModifiers ?? ""), n >= 1, n <= self.variantTexts.count {
+                self.pick(n - 1); return nil
+            }
+            return event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
     }
 
     private func makeRow(index: Int, text: String) -> NSView {
         let row = ClickableRow()
         row.onClick = { [weak self] in self?.pick(index) }
         row.wantsLayer = true
-        row.layer?.cornerRadius = 10
+        row.layer?.cornerRadius = 12
         row.translatesAutoresizingMaskIntoConstraints = false
         let badge = NSTextField(labelWithString: "\(index + 1)")
         badge.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
@@ -1873,21 +1902,21 @@ final class VariantsPanel: NSObject {
         badge.widthAnchor.constraint(equalToConstant: 22).isActive = true
         badge.heightAnchor.constraint(equalToConstant: 22).isActive = true
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .labelColor
-        label.preferredMaxLayoutWidth = 520
+        label.font = .systemFont(ofSize: 13.5)
+        label.textColor = .white
+        label.preferredMaxLayoutWidth = rowWidth - 20 - 22 - 12 - 20   // отступы строки + бейдж + зазор
         let h = NSStackView(views: [badge, label])
         h.orientation = .horizontal
         h.alignment = .top
-        h.spacing = 10
+        h.spacing = 12
         h.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(h)
         NSLayoutConstraint.activate([
-            h.topAnchor.constraint(equalTo: row.topAnchor, constant: 8),
-            h.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -8),
+            h.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
+            h.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -9),
             h.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
             h.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
-            row.widthAnchor.constraint(equalToConstant: 540),
+            row.widthAnchor.constraint(equalToConstant: rowWidth),
         ])
         return row
     }
@@ -1896,6 +1925,7 @@ final class VariantsPanel: NSObject {
         guard i >= 0, i < variantTexts.count else { return }
         let text = variantTexts[i]
         let cfg = App.shared.config
+        removeKeyMonitor()
         panel.close()
         previousApp?.activate(options: [])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {

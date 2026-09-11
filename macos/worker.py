@@ -283,8 +283,8 @@ def main():
                     log(f"правка вариантов ← {instruction[:200]}")
                     raw = apillm.chat(rw["api_url"], rw["api_key"], rw["api_model"],
                                       rewrite.build_refine_messages(variants, instruction, r.get("style", "")),
-                                      max_tokens=1200)
-                    new = rewrite.parse_variants(raw)
+                                      max_tokens=1400)
+                    new = rewrite.parse_variants(raw, count=6)
                     if not new:
                         raise ValueError("модель не вернула варианты после правки")
                     out({"text": "", "variants": new, "style": r.get("style", ""),
