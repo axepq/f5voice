@@ -1732,6 +1732,8 @@ final class VariantsPanel: NSObject {
     private var previousApp: NSRunningApplication?
 
     var isVisible: Bool { panel.isVisible }
+    private let sheen = CAGradientLayer()      // блик по стеклу сверху
+    private let edge = CAGradientLayer()       // световая кромка
 
     override init() {
         panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 200),
@@ -1745,18 +1747,36 @@ final class VariantsPanel: NSObject {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.appearance = NSAppearance(named: .darkAqua)   // всегда тёмное стекло, чтобы блик и кромка играли
         panel.onPick = { [weak self] i in self?.pick(i) }
 
-        // Объёмное стекло macOS: размытие фона, скруглённые края, тонкая светлая обводка.
+        // Объёмное тёмное стекло: размытие фона, крупное скругление, блик сверху и световая кромка.
         let glass = NSVisualEffectView()
         glass.material = .hudWindow
         glass.blendingMode = .behindWindow
         glass.state = .active
         glass.wantsLayer = true
-        glass.layer?.cornerRadius = 18
+        glass.layer?.cornerRadius = 22
+        glass.layer?.cornerCurve = .continuous
         glass.layer?.borderWidth = 1
-        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
         glass.translatesAutoresizingMaskIntoConstraints = false
+        // Мягкая объёмная тень под блоком.
+        panel.contentView?.superview?.wantsLayer = true
+        glass.shadow = NSShadow()
+        if let sh = glass.shadow { sh.shadowBlurRadius = 40; sh.shadowOffset = NSSize(width: 0, height: -12); sh.shadowColor = NSColor.black.withAlphaComponent(0.5) }
+        // Блик: белый глянец, стекающий сверху, придаёт объём.
+        sheen.colors = [NSColor.white.withAlphaComponent(0.22).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
+        sheen.startPoint = CGPoint(x: 0.5, y: 1.0)
+        sheen.endPoint = CGPoint(x: 0.5, y: 0.55)
+        sheen.cornerRadius = 22
+        sheen.cornerCurve = .continuous
+        glass.layer?.addSublayer(sheen)
+        // Светлая кромка по верхнему краю — как отблеск на грани стекла.
+        edge.colors = [NSColor.white.withAlphaComponent(0.5).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
+        edge.startPoint = CGPoint(x: 0, y: 0.5)
+        edge.endPoint = CGPoint(x: 1, y: 0.5)
+        glass.layer?.addSublayer(edge)
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.textColor = .secondaryLabelColor
@@ -1800,17 +1820,26 @@ final class VariantsPanel: NSObject {
         panel.setContentSize(NSSize(width: width, height: 200))
         let size = panel.contentView!.fittingSize
         let h = max(size.height, 120)
-        panel.setFrame(NSRect(x: visible.midX - width / 2, y: visible.minY + 80, width: width, height: h), display: true)
-        // Мягкое появление: плашка-капля растворяется, блок проступает и чуть подрастает.
-        panel.alphaValue = 0
-        panel.contentView?.layer?.setAffineTransform(CGAffineTransform(scaleX: 0.96, y: 0.96))
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        let finalFrame = NSRect(x: visible.midX - width / 2, y: visible.minY + 80, width: width, height: h)
+        let already = panel.isVisible
+        if !already {
+            // Морфинг из капли: старт узкой пилюлей на месте плашки, затем разворот в блок.
+            let pill = NSRect(x: visible.midX - 150, y: visible.minY + 80, width: 300, height: 54)
+            panel.setFrame(pill, display: false)
+            panel.alphaValue = 0
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        sheen.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
+        edge.frame = CGRect(x: 12, y: finalFrame.height - 1.5, width: finalFrame.width - 24, height: 1.5)
+        CATransaction.commit()
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.28
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.duration = already ? 0.2 : 0.34
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)  // мягкий «выкат»
+            panel.animator().setFrame(finalFrame, display: true)
             panel.animator().alphaValue = 1
-            panel.contentView?.layer?.setAffineTransform(.identity)
         }
     }
 
@@ -1825,8 +1854,13 @@ final class VariantsPanel: NSObject {
         badge.textColor = .white
         badge.alignment = .center
         badge.wantsLayer = true
-        badge.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
-        badge.layer?.cornerRadius = 9
+        let bg = CAGradientLayer()
+        bg.colors = [NSColor(calibratedRed: 0.42, green: 0.55, blue: 1.0, alpha: 1).cgColor,
+                     NSColor(calibratedRed: 0.30, green: 0.40, blue: 0.95, alpha: 1).cgColor]
+        bg.startPoint = CGPoint(x: 0.5, y: 1); bg.endPoint = CGPoint(x: 0.5, y: 0)
+        bg.cornerRadius = 11; bg.frame = CGRect(x: 0, y: 0, width: 22, height: 22)
+        badge.layer?.addSublayer(bg)
+        badge.layer?.cornerRadius = 11
         badge.widthAnchor.constraint(equalToConstant: 22).isActive = true
         badge.heightAnchor.constraint(equalToConstant: 22).isActive = true
         let label = NSTextField(wrappingLabelWithString: text)
@@ -1873,7 +1907,7 @@ final class ClickableRow: NSView {
         addTrackingArea(t)
         tracking = t
     }
-    override func mouseEntered(with event: NSEvent) { layer?.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor }
+    override func mouseEntered(with event: NSEvent) { layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor }
     override func mouseExited(with event: NSEvent) { layer?.backgroundColor = .clear }
 }
 
