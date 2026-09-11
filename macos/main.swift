@@ -783,25 +783,34 @@ final class BarsView: NSView {
 
 /// Верхний световой блик и светлая кромка как сублои стекла — объёмное «жидкое стекло»
 /// (тот же приём, что у блока вариантов). Слои тянутся вместе со стеклом через autoresizing.
-func addLiquidSheen(to view: NSView, cornerRadius r: CGFloat, rim: Bool = true) {
-    view.wantsLayer = true
-    view.layer?.masksToBounds = false
-    let top = CAGradientLayer()
-    top.colors = [NSColor(white: 1, alpha: 0.30).cgColor, NSColor(white: 1, alpha: 0.06).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
-    top.locations = [0, 0.16, 0.5]
-    top.startPoint = CGPoint(x: 0.5, y: 1); top.endPoint = CGPoint(x: 0.5, y: 0)
-    top.cornerRadius = r
-    top.frame = view.bounds
-    top.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-    view.layer?.addSublayer(top)
-    if rim {                                   // светлая кромка — для стекла; у метала край рисует MetalRing
-        let edge = CALayer()
-        edge.cornerRadius = r
-        edge.borderWidth = 1; edge.borderColor = NSColor(white: 1, alpha: 0.20).cgColor
-        edge.frame = view.bounds
-        edge.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        view.layer?.addSublayer(edge)
+/// Блик-оверлей: кладём ВНУТРЬ контента стекла (иначе NSGlassEffectView перекрывает наши слои).
+/// Верхний световой блик + нижнее затемнение (объём) + яркая кромка. Возвращает готовый вид.
+func makeSheen(_ bounds: NSRect, cornerRadius r: CGFloat, rim: Bool = true) -> NSView {
+    let v = NSView(frame: bounds)
+    v.autoresizingMask = [.width, .height]
+    v.wantsLayer = true
+    v.layer?.masksToBounds = false
+    let fill: (CAGradientLayer) -> Void = { g in
+        g.cornerRadius = r; g.frame = bounds
+        g.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        g.startPoint = CGPoint(x: 0.5, y: 1); g.endPoint = CGPoint(x: 0.5, y: 0)
     }
+    let bottom = CAGradientLayer()             // тёмный низ — даёт объём/глубину
+    bottom.colors = [NSColor(white: 0, alpha: 0.0).cgColor, NSColor(white: 0, alpha: 0.22).cgColor]
+    bottom.locations = [0.5, 1]; fill(bottom)
+    v.layer?.addSublayer(bottom)
+    let top = CAGradientLayer()                // яркий верхний глянец
+    top.colors = [NSColor(white: 1, alpha: 0.5).cgColor, NSColor(white: 1, alpha: 0.12).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
+    top.locations = [0, 0.2, 0.6]; fill(top)
+    v.layer?.addSublayer(top)
+    if rim {                                   // яркая стеклянная кромка (у метала край рисует MetalRing)
+        let edge = CALayer()
+        edge.cornerRadius = r; edge.frame = bounds
+        edge.borderWidth = 1.5; edge.borderColor = NSColor(white: 1, alpha: 0.4).cgColor
+        edge.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        v.layer?.addSublayer(edge)
+    }
+    return v
 }
 
 final class HUD {
@@ -870,15 +879,15 @@ final class HUD {
             glass.setValue(content, forKey: "contentView")   // сначала контент — иначе стекло сбросит наши сублои
             glass.autoresizingMask = [.width, .height]
             if style == "glass" {
-                // То же объёмное жидкое стекло, что у блока вариантов: чистый стиль + тёмный тон + блик и кромка ПОВЕРХ.
+                // Объёмное жидкое стекло: чистый стиль + тёмный тон, а блик-оверлей — ВНУТРЬ контента.
                 glass.setValue(1, forKey: "style")
                 glass.setValue(NSColor.black.withAlphaComponent(0.32), forKey: "tintColor")
-                addLiquidSheen(to: glass, cornerRadius: 25)
+                content.addSubview(makeSheen(bounds, cornerRadius: 25))
             } else if style == "metal" {
-                // Объёмное жидкое стекло + металлический край: чистое стекло, верхний блик, а кромку рисует MetalRing.
+                // Объёмное жидкое стекло + металлический край: блик внутри контента, кромку рисует MetalRing.
                 glass.setValue(1, forKey: "style")
                 glass.setValue(NSColor.black.withAlphaComponent(0.42), forKey: "tintColor")
-                addLiquidSheen(to: glass, cornerRadius: 25, rim: false)
+                content.addSubview(makeSheen(bounds, cornerRadius: 25, rim: false))
             } else {
                 if let tint = tints[style] ?? nil { glass.setValue(tint, forKey: "tintColor") }
                 if style == "clear" { glass.setValue(1, forKey: "style") }  // NSGlassEffectView.Style.clear
