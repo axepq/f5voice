@@ -1732,6 +1732,7 @@ final class VariantsPanel: NSObject {
     private var previousApp: NSRunningApplication?
 
     var isVisible: Bool { panel.isVisible }
+    private let tint = CAGradientLayer()       // тёмная подложка: стекло тёмное на любом фоне
     private let sheen = CAGradientLayer()      // блик по стеклу сверху
     private let edge = CAGradientLayer()       // световая кромка
 
@@ -1761,6 +1762,12 @@ final class VariantsPanel: NSObject {
         glass.layer?.borderWidth = 1
         glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
         glass.translatesAutoresizingMaskIntoConstraints = false
+        // Тёмная стеклянная подложка с лёгким вертикальным градиентом — объём и постоянный тёмный тон.
+        tint.colors = [NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.17, alpha: 0.72).cgColor,
+                       NSColor(calibratedRed: 0.05, green: 0.05, blue: 0.07, alpha: 0.80).cgColor]
+        tint.startPoint = CGPoint(x: 0.5, y: 1); tint.endPoint = CGPoint(x: 0.5, y: 0)
+        tint.cornerRadius = 22; tint.cornerCurve = .continuous
+        glass.layer?.addSublayer(tint)
         // Мягкая объёмная тень под блоком.
         panel.contentView?.superview?.wantsLayer = true
         glass.shadow = NSShadow()
@@ -1771,6 +1778,7 @@ final class VariantsPanel: NSObject {
         sheen.endPoint = CGPoint(x: 0.5, y: 0.55)
         sheen.cornerRadius = 22
         sheen.cornerCurve = .continuous
+        sheen.colors = [NSColor.white.withAlphaComponent(0.16).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
         glass.layer?.addSublayer(sheen)
         // Светлая кромка по верхнему краю — как отблеск на грани стекла.
         edge.colors = [NSColor.white.withAlphaComponent(0.5).cgColor, NSColor.white.withAlphaComponent(0.0).cgColor]
@@ -1779,7 +1787,7 @@ final class VariantsPanel: NSObject {
         glass.layer?.addSublayer(edge)
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.textColor = NSColor.white.withAlphaComponent(0.6)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -1832,6 +1840,7 @@ final class VariantsPanel: NSObject {
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        tint.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
         sheen.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
         edge.frame = CGRect(x: 12, y: finalFrame.height - 1.5, width: finalFrame.width - 24, height: 1.5)
         CATransaction.commit()
