@@ -795,11 +795,8 @@ func makeSheen(_ bounds: NSRect, cornerRadius r: CGFloat, rim: Bool = true) -> N
         g.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         g.startPoint = CGPoint(x: 0.5, y: 1); g.endPoint = CGPoint(x: 0.5, y: 0)
     }
-    let bottom = CAGradientLayer()             // тёмный низ — даёт объём/глубину
-    bottom.colors = [NSColor(white: 0, alpha: 0.0).cgColor, NSColor(white: 0, alpha: 0.22).cgColor]
-    bottom.locations = [0.5, 1]; fill(bottom)
-    v.layer?.addSublayer(bottom)
-    let top = CAGradientLayer()                // яркий верхний глянец
+    // Только мягкий верхний глянец. Никаких тёмных краёв/рамок — чтобы не портить вид на светлом фоне.
+    let top = CAGradientLayer()
     top.colors = [NSColor(white: 1, alpha: 0.5).cgColor, NSColor(white: 1, alpha: 0.12).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
     top.locations = [0, 0.2, 0.6]; fill(top)
     v.layer?.addSublayer(top)
@@ -835,7 +832,7 @@ final class HUD {
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false   // оконная тень видна тёмным ореолом на светлом фоне — убираем
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
