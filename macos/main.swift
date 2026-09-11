@@ -781,6 +781,27 @@ final class BarsView: NSView {
     }
 }
 
+/// Верхний световой блик и светлая кромка как сублои стекла — объёмное «жидкое стекло»
+/// (тот же приём, что у блока вариантов). Слои тянутся вместе со стеклом через autoresizing.
+func addLiquidSheen(to view: NSView, cornerRadius r: CGFloat) {
+    view.wantsLayer = true
+    view.layer?.masksToBounds = false
+    let top = CAGradientLayer()
+    top.colors = [NSColor(white: 1, alpha: 0.30).cgColor, NSColor(white: 1, alpha: 0.06).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
+    top.locations = [0, 0.16, 0.5]
+    top.startPoint = CGPoint(x: 0.5, y: 1); top.endPoint = CGPoint(x: 0.5, y: 0)
+    top.cornerRadius = r
+    top.frame = view.bounds
+    top.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    let rim = CALayer()
+    rim.cornerRadius = r
+    rim.borderWidth = 1; rim.borderColor = NSColor(white: 1, alpha: 0.20).cgColor
+    rim.frame = view.bounds
+    rim.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    view.layer?.addSublayer(top)
+    view.layer?.addSublayer(rim)
+}
+
 final class HUD {
     private let panel: NSPanel
     private let icon = NSImageView()
@@ -844,8 +865,15 @@ final class HUD {
         if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
             let glass = glassClass.init(frame: bounds)
             glass.setValue(25.0, forKey: "cornerRadius")
-            if let tint = tints[style] ?? nil { glass.setValue(tint, forKey: "tintColor") }
-            if style == "clear" { glass.setValue(1, forKey: "style") }  // NSGlassEffectView.Style.clear
+            if style == "glass" {
+                // То же объёмное жидкое стекло, что у блока вариантов: чистый стиль + тёмный тон + блик и кромка.
+                glass.setValue(1, forKey: "style")
+                glass.setValue(NSColor.black.withAlphaComponent(0.32), forKey: "tintColor")
+                addLiquidSheen(to: glass, cornerRadius: 25)
+            } else {
+                if let tint = tints[style] ?? nil { glass.setValue(tint, forKey: "tintColor") }
+                if style == "clear" { glass.setValue(1, forKey: "style") }  // NSGlassEffectView.Style.clear
+            }
             glass.setValue(content, forKey: "contentView")
             glass.autoresizingMask = [.width, .height]
             panel.contentView = glass
