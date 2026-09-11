@@ -1788,7 +1788,7 @@ final class VariantsPanel: NSObject {
             glass.autoresizingMask = [.width, .height]
             glass.cornerRadius = 28
             glass.setValue(1, forKey: "style")                         // clear — чистое прозрачное стекло (как в водах), а не морозное
-            glass.tintColor = NSColor.black.withAlphaComponent(0.10)   // едва заметный тон только чтобы белый текст читался
+            glass.tintColor = NSColor.black.withAlphaComponent(0.32)   // тёмное стекло — белый текст читается и на светлом фоне
             glass.contentView = root
             container.addSubview(glass)
         } else {
@@ -1842,33 +1842,43 @@ final class VariantsPanel: NSObject {
 
         let already = panel.isVisible
         if !already {
-            // Капля поднимается из голосовой плашки: маленькая, чуть вытянутая капля у низа,
-            // затем упруго раскрывается в стеклянный блок; текст подхватывается следом.
-            let drop = NSRect(x: visible.midX - 33, y: visible.minY + 46, width: 66, height: 84)
-            panel.setFrame(drop, display: false)
+            // Капля выходит из голосовой плашки (низ по центру): проявляется, медленно
+            // поднимается маленькой каплей к месту блока, затем плавно распускается в блок.
+            let dropW: CGFloat = 52, dropH: CGFloat = 64
+            let pill  = NSRect(x: visible.midX - dropW / 2, y: visible.minY + 48, width: dropW, height: dropH)
+            let risen = NSRect(x: finalFrame.midX - dropW / 2, y: finalFrame.midY - dropH / 2, width: dropW, height: dropH)
+            panel.setFrame(pill, display: false)
             panel.alphaValue = 0
             root.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             installKeyMonitor()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.16
+                ctx.duration = 0.28
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                panel.animator().alphaValue = 1                          // капля проявляется
+                panel.animator().alphaValue = 1                          // капля проявляется из плашки
             }
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.6
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.94, 0.24, 1)  // плавный подъём и мягкое раскрытие
-                panel.animator().setFrame(finalFrame, display: true)
-            }
-            // Контент проявляется, когда в блоке уже есть место — чтобы текст не сплющивался в капле.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            // Фаза 1 — капля медленно поднимается, оставаясь маленькой.
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.62
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 0.25, 1)   // мягкий подъём
+                self.panel.animator().setFrame(risen, display: true)
+            }, completionHandler: {
+                // Фаза 2 — капля плавно распускается в стеклянный блок из центра.
                 NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.3
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    self.root.animator().alphaValue = 1
+                    ctx.duration = 0.72
+                    ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.9, 0.18, 1)  // плавное распускание, мягкое оседание
+                    self.panel.animator().setFrame(finalFrame, display: true)
                 }
-            }
+                // Текст проявляется по мере распускания — чтобы не сплющивался в капле.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.42
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        self.root.animator().alphaValue = 1
+                    }
+                }
+            })
         } else {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.24
