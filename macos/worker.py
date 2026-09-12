@@ -106,10 +106,12 @@ def rewrite_settings():
     except (TypeError, ValueError):
         idle_sec = rewrite.DEFAULT_IDLE_MINUTES * 60
     keyword = cfg.get("rewrite_keyword", rewrite.DEFAULT_KEYWORD)
+    sel_keyword = cfg.get("selection_keyword", rewrite.DEFAULT_SELECTION_KEYWORD)
     answer_model = cfg.get("answer_model", "")  # по умолчанию ответы выключены; код цел, включается в настройках
     answer_keyword = cfg.get("answer_keyword", rewrite.ANSWER_KEYWORD)
     return {"model": model if isinstance(model, str) else "", "idle_sec": idle_sec,
             "keyword": keyword.strip() if isinstance(keyword, str) else "",
+            "selection_keyword": sel_keyword.strip() if isinstance(sel_keyword, str) else rewrite.DEFAULT_SELECTION_KEYWORD,
             "commands": rewrite.merge_commands(cfg.get("rewrite_commands")),
             "answer_model": answer_model if isinstance(answer_model, str) else "",
             "answer_keyword": answer_keyword.strip() if isinstance(answer_keyword, str) else "",
@@ -305,7 +307,7 @@ def main():
             active = rw["enabled"] and (use_api(rw) or rw["model"])
             # Сказана только команда над выделенным текстом («исправь этот текст…») — просим приложение
             # скопировать выделение и прислать его на переписывание, вставленный текст не печатаем.
-            sel = rewrite.selection_instruction(text) if (active and use_api(rw)) else None
+            sel = rewrite.selection_instruction(text, rw["selection_keyword"]) if (active and use_api(rw)) else None
             if sel:
                 out({"text": "", "selection_rewrite": sel})
                 last_use = time.time()

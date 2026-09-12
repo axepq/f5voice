@@ -57,6 +57,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let keyField = NSSecureTextField(string: "")
     private let apiModelField = NSTextField(string: "")
     private let keywordField = NSTextField(string: "")
+    private let selKeywordField = NSTextField(string: "")
     private let speedSlider = NSSlider(value: 1.3, minValue: 0.6, maxValue: 2.0, target: nil, action: nil)
     private let jellySlider = NSSlider(value: 0.4, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let speedValue = NSTextField(labelWithString: "")
@@ -339,11 +340,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         providerPopup.widthAnchor.constraint(equalToConstant: 300).isActive = true
         for repl in rewriteProviders { providerPopup.addItem(withTitle: repl.label) }
         providerPopup.toolTip = "Переписывает облачная модель по API. DeepSeek и Grok — вольнее и с юмором"
-        for field in [keyField, apiModelField, keywordField] {
+        for field in [keyField, apiModelField, keywordField, selKeywordField] {
             field.delegate = self
             field.target = self
             field.action = #selector(fieldChanged)
         }
+        selKeywordField.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        selKeywordField.placeholderString = "правка"
+        selKeywordField.toolTip = "Выдели текст в любом приложении, нажми хоткей и скажи «правка, <что сделать>» — перепишет выделенное"
         keyField.widthAnchor.constraint(equalToConstant: 300).isActive = true
         keyField.placeholderString = "sk-…  (ключ хранится только у вас, в config.json)"
         apiModelField.widthAnchor.constraint(equalToConstant: 300).isActive = true
@@ -358,6 +362,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             [label("Ключ API"), keyField],
             [label("Модель"), apiModelField],
             [label("Слово для своей инструкции"), keywordField],
+            [label("Слово для правки выделенного"), selKeywordField],
         ])
         aiForm.rowSpacing = 10
         aiForm.columnSpacing = 12
@@ -531,8 +536,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         providerPopup.selectItem(at: rewriteProviders.firstIndex { $0.id == c.rewriteApiProvider } ?? 0)
         if keyField.currentEditor() == nil { keyField.stringValue = c.rewriteApiKey }
         if apiModelField.currentEditor() == nil { apiModelField.stringValue = c.rewriteApiModel }
-        for ctl in [providerPopup, keyField, apiModelField, keywordField] as [NSControl] { ctl.isEnabled = c.rewriteEnabled }
+        for ctl in [providerPopup, keyField, apiModelField, keywordField, selKeywordField] as [NSControl] { ctl.isEnabled = c.rewriteEnabled }
         if keywordField.currentEditor() == nil { keywordField.stringValue = c.rewriteKeyword }
+        if selKeywordField.currentEditor() == nil { selKeywordField.stringValue = c.selectionKeyword }
         if stylesTable.currentEditor() == nil {
             styles = c.rewriteCommands
             stylesTable.reloadData()
@@ -738,6 +744,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         if apiModel != app.config.rewriteApiModel { updates["rewrite_api_model"] = apiModel }
         let kw = keywordField.stringValue.trimmingCharacters(in: .whitespaces)
         if kw != app.config.rewriteKeyword { updates["rewrite_keyword"] = kw }
+        let selKw = selKeywordField.stringValue.trimmingCharacters(in: .whitespaces)
+        if !selKw.isEmpty, selKw != app.config.selectionKeyword { updates["selection_keyword"] = selKw }
         let sttKey = sttKeyField.stringValue.trimmingCharacters(in: .whitespaces)
         if sttKey != app.config.sttApiKey { updates["stt_api_key"] = sttKey }
         if !updates.isEmpty { app.apply(updates) }

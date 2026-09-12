@@ -102,6 +102,7 @@ struct Config {
     var rewriteModel = ""                    // локальная модель (по умолчанию выключена, код цел)
     var rewriteIdleMinutes = 1.0
     var rewriteKeyword = "команда"
+    var selectionKeyword = "правка"   // слово-маркер для правки выделенного текста
     var rewriteCommands: [(triggers: String, instruction: String)] = []  // свои стили, порядок как в файле
     var answerModel = ""    // ответы выключены по умолчанию; включаются галочкой (тогда берётся Nemo)
     var answerKeyword = "ответь"
@@ -165,6 +166,7 @@ struct Config {
         if let v = obj["rewrite_api_model"] as? String { c.rewriteApiModel = v }
         if let v = obj["rewrite_idle_minutes"] as? Double { c.rewriteIdleMinutes = v }
         if let v = obj["rewrite_keyword"] as? String { c.rewriteKeyword = v }
+        if let v = obj["selection_keyword"] as? String, !v.isEmpty { c.selectionKeyword = v }
         if let v = obj["rewrite_commands"] as? [String: String] {
             c.rewriteCommands = v.keys.sorted().map { (triggers: $0, instruction: v[$0]!) }
         }
