@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Воркер распознавания F5Voice для macOS (mlx-whisper, Apple Silicon).
+"""Воркер распознавания F5Voice для macOS (облачный STT + локальное переписывание).
 
 Держит модель в памяти и по строке из stdin (путь к WAV) отвечает одной
 JSON-строкой в stdout. Сам выходит, если его не трогали F5_IDLE_SEC секунд —
@@ -37,7 +37,6 @@ JSON-строкой в stdout. Сам выходит, если его не тр�
 сам, при каждом запросе — правки без перезапуска. "rewrite_model": "" выключает переписывание,
 "answer_model": "" — ответы.
 """
-import glob
 import json
 import os
 from pathlib import Path
@@ -51,8 +50,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from common.audio_io import load_audio  # noqa: E402
-from common.segments import assemble  # noqa: E402
-from common.textproc import DEFAULT_PROMPT, RU_HINT, finalize, fix_command_endings  # noqa: E402
+from common.textproc import DEFAULT_PROMPT, finalize, fix_command_endings  # noqa: E402
 from common.vad import is_silence  # noqa: E402
 from common import history  # noqa: E402
 from common import rewrite  # noqa: E402
@@ -77,13 +75,6 @@ RATE = 16000
 def out(obj):
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
-
-
-def cache_ready(model):
-    pattern = os.path.expanduser(
-        "~/.cache/huggingface/hub/models--" + model.replace("/", "--") + "/snapshots/*/config.json"
-    )
-    return bool(glob.glob(pattern))
 
 
 def log(msg):
@@ -190,80 +181,20 @@ def do_rewrite(llm, rw, body, cmd):
 
 
 def main():
-    if cache_ready(MODEL):
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
-    import mlx.core as mx
-    import mlx_whisper
-    import numpy as np
-    from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
-    from mlx_whisper.transcribe import ModelHolder
-
-    dtype = mx.float16
-
-    def detect(audio):
-        """Вероятности языков из LANGS для куска звука (как в mlx_whisper.transcribe)."""
-        model = ModelHolder.get_model(MODEL, dtype)
-        mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)
-        segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(dtype)
-        _, probs = model.detect_language(segment)
-        return {lang: round(float(probs.get(lang, 0.0)), 3) for lang in LANGS}
-
-    def pick_language(audio):
-        """Основной язык — LANGS[0]; другой берём только при высокой уверенности,
-        иначе whisper с чужим токеном не транскрибирует речь, а переводит её."""
-        if len(LANGS) == 1:
-            return LANGS[0], {}
-        scores = detect(audio)
-        alt = max(LANGS[1:], key=lambda l: scores[l])
-        return (alt if scores[alt] >= ALT_MIN_PROB else LANGS[0]), scores
-
-    def run(audio, lang, prompt=PROMPT, temperature=(0.0, 0.2, 0.4, 0.6)):  # 0.6 сбрасывает контекст при петле
-        return mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=MODEL,
-            language=lang,
-            task="transcribe",
-            initial_prompt=prompt,
-            # Контекст переносится между 30-секундными окнами: без него второе окно
-            # с английскими словами модель теряла целиком, а названия писала транслитом.
-            condition_on_previous_text=True,
-            temperature=temperature,
-            fp16=True,
-            verbose=None,
-        )
-
-    def recognize(audio):
-        lang, scores = pick_language(audio)
-        result = run(audio, lang)
-        segs = [(s["start"], s["end"], s.get("text", ""),
-                 {k: s.get(k) for k in ("compression_ratio", "no_speech_prob", "avg_logprob")})
-                for s in result.get("segments") or []]
-        duration = audio.size / RATE
-
-        def redecode(start, end, context):
-            """Сегмент латиницей при русском токене: если по звуку русский — декодируем заново."""
-            chunk = audio[int(start * RATE):int(end * RATE)]
-            if chunk.size < RATE // 2:
-                return None
-            p = detect(chunk)
-            if p.get(LANGS[0], 0.0) < p.get("en", 0.0):
-                return None  # действительно английский, не трогаем
-            again = run(chunk, LANGS[0], prompt=(context or RU_HINT), temperature=0.0)
-            return (again.get("text") or "").strip()
-
-        may_fix = lang == LANGS[0] and scores.get("en", 0.0) < 0.6
-        text, fixed = assemble(segs, duration, redecode if may_fix else None)
-        out_text = finalize(text, PROMPT)
+    def cloud_recognize(path):
+        """Распознать WAV облачным STT; вернуть (text, lang, scores, fixed), как прежний recognize().
+        Локального Whisper больше нет — при выключенном/недоступном облаке поднимаем ошибку."""
+        stt = stt_settings()
+        if not stt["enabled"]:
+            raise RuntimeError("облачное распознавание выключено — задай stt_* в config.json")
+        raw = sttapi.transcribe(path, stt["key"], stt["model"], stt["language"], stt["provider"])
+        text = finalize(raw, PROMPT)
         if fix_cmd_enabled():
-            out_text = fix_command_endings(out_text)
-        return out_text, lang, scores, fixed
+            text = fix_command_endings(text)
+        return text, "scribe", {}, 0
 
-    t0 = time.time()
-    warm = np.zeros(RATE, dtype=np.float32)
-    pick_language(warm)
-    run(warm, LANGS[0])  # прогрев: грузим веса и компилируем ядра
-    out({"ready": True, "load_sec": round(time.time() - t0, 1), "langs": list(LANGS), "model": MODEL})
+    # Локальная модель не грузится — воркер готов сразу.
+    out({"ready": True, "load_sec": 0.0, "langs": list(LANGS), "provider": "cloud"})
 
     llm = Rewriter(log)
     last_use = time.time()
@@ -313,8 +244,7 @@ def main():
                 elif "refine" in req and use_api(rw):
                     r = req["refine"]
                     variants = [str(v) for v in (r.get("variants") or [])]
-                    audio = load_audio(r["path"])          # голосовая правка ещё как звук — распознаём
-                    instruction, _lang, _sc, _fx = recognize(audio)
+                    instruction, _lang, _sc, _fx = cloud_recognize(r["path"])   # голосовую правку распознаём облаком
                     out({"status": "variants", "command": instruction[:40]})
                     log(f"правка вариантов ← {instruction[:200]}")
                     raw = apillm.chat(rw["api_url"], rw["api_key"], rw["api_model"],
@@ -340,21 +270,12 @@ def main():
             if quiet:
                 out({"text": "", "reason": "silence", "dur": dur, "speech": speech})
                 continue
-            stt = stt_settings()
-            text = None
-            if stt["enabled"]:
-                try:
-                    raw = sttapi.transcribe(path, stt["key"], stt["model"], stt["language"], stt["provider"])
-                    text = finalize(raw, PROMPT)
-                    if fix_cmd_enabled():
-                        text = fix_command_endings(text)
-                    lang, scores, fixed = "scribe", {}, 0
-                    log(f"облачный STT ({stt['provider']}): {text[:200]}")
-                except Exception as e:  # noqa: BLE001
-                    log(f"облачный STT не сработал ({e}) — падаю на локальный Whisper")
-                    text = None
-            if text is None:
-                text, lang, scores, fixed = recognize(audio)
+            try:
+                text, lang, scores, fixed = cloud_recognize(path)
+            except Exception as e:  # noqa: BLE001
+                out({"text": "", "error": f"облачный STT: {e}"})
+                continue
+            log(f"облачный STT: {text[:200]}")
             extra = {}
             rw = rewrite_settings()
             asked = rewrite.split_answer(text, rw["answer_keyword"], rw["personas"]) if rw["answer_model"] or use_api(rw) else None
