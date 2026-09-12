@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>F5Voice записывает голос для локальной диктовки по горячей клавише. Звук никуда не отправляется.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>F5Voice ставит музыку на паузу на время диктовки и возвращает её после — через Spotify и Music.</string>
 </dict>
 </plist>

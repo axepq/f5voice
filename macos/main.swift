@@ -1509,6 +1509,32 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Пауза музыки на время диктовки, чтобы звук из колонок не попадал в запись.
+    private var pausedMediaApps: [String] = []
+
+    private func runOSA(_ src: String) -> String? {
+        var err: NSDictionary?
+        let out = NSAppleScript(source: src)?.executeAndReturnError(&err)
+        return out?.stringValue
+    }
+
+    private func pauseMediaForDictation() {
+        pausedMediaApps = []
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        let apps = [("Spotify", "com.spotify.client"), ("Music", "com.apple.Music")]
+        for (name, bundle) in apps where running.contains(bundle) {
+            // Одним событием: если играет — ставим на паузу и запоминаем, что это мы её остановили.
+            let src = "tell application \"\(name)\"\nif player state is playing then\npause\nreturn \"y\"\nend if\nreturn \"n\"\nend tell"
+            if runOSA(src) == "y" { pausedMediaApps.append(name) }
+        }
+    }
+
+    private func resumeMediaAfterDictation() {
+        let apps = pausedMediaApps
+        pausedMediaApps = []
+        for name in apps { _ = runOSA("if application \"\(name)\" is running then tell application \"\(name)\" to play") }
+    }
+
     private func startRecording() {
         if !micOK, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { micOK = true }
         guard micOK else {
@@ -1519,10 +1545,12 @@ final class App: NSObject, NSApplicationDelegate {
         }
         refining = variantsPanel.isVisible
         worker.ping()
+        pauseMediaForDictation()   // музыку — на паузу, чтобы не попадала в запись
         do {
             try recorder.start(to: lastWav)
         } catch {
             log("запись не началась: \(error.localizedDescription)")
+            resumeMediaAfterDictation()   // запись не пошла — вернуть музыку
             play("Basso")
             hud.show("Не удалось начать запись — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
             return
@@ -1550,6 +1578,7 @@ final class App: NSObject, NSApplicationDelegate {
         meterTimer?.invalidate()
         meterTimer = nil
         let seconds = recorder.stop()
+        resumeMediaAfterDictation()   // диктовка закончена — вернуть музыку
         guard andTranscribe else {
             state = .idle
             updateIcon()
