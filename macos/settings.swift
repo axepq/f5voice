@@ -48,6 +48,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     private let fixCmdBox = NSSwitch()
     private let micLabel = NSTextField(labelWithString: "")
     private let axLabel = NSTextField(labelWithString: "")
+    // Облачное распознавание речи (STT)
+    private let sttBox = NSSwitch()
+    private let sttKeyField = NSSecureTextField(string: "")
     // Переписывание и ответы
     private let rewriteBox = NSSwitch()
     private let providerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -268,10 +271,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         languagesField.widthAnchor.constraint(equalToConstant: 300).isActive = true
         languagesField.placeholderString = "ru,en"
         languagesField.toolTip = "Через запятую, первый — основной"
-        modelPopup.target = self
-        modelPopup.action = #selector(whisperModelChanged)
-        modelPopup.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        modelPopup.toolTip = "Модель распознавания речи; другая скачается при первой диктовке (один раз)"
+        sttBox.target = self
+        sttBox.action = #selector(sttToggled)
+        sttKeyField.delegate = self
+        sttKeyField.target = self
+        sttKeyField.action = #selector(fieldChanged)
+        sttKeyField.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        sttKeyField.placeholderString = "sk_…  (ключ хранится только у вас, в config.json)"
+        sttKeyField.toolTip = "Ключ ElevenLabs. Получить: elevenlabs.io → Profile → API Keys"
 
         for popup in [termPopup, otherPopup] {
             for (name, text) in newlineNames {
@@ -311,7 +318,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
             [label("Запись"), recordPopup],
             [label("Стиль плашки"), styleRow],
             [label("Языки"), languagesField],
-            [label("Модель"), modelPopup],
             [label("Перенос строки в терминале"), termPopup],
             [label("В остальных программах"), otherPopup],
             [label("Скорость блока вариантов"), speedRow],
@@ -457,17 +463,35 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         let histBody = NSStackView(views: [scroll, historyBar])
         histBody.orientation = .vertical; histBody.alignment = .leading; histBody.spacing = 10
 
+        let sttForm = NSGridView(views: [
+            [NSGridCell.emptyContentView, toggleRow(sttBox, "Облачное распознавание (ElevenLabs Scribe)")],
+            [label("Ключ API"), sttKeyField],
+        ])
+        sttForm.rowSpacing = 10
+        sttForm.columnSpacing = 12
+        sttForm.rowAlignment = .firstBaseline
+        sttForm.column(at: 0).xPlacement = .trailing
+        let sttHint = NSTextField(wrappingLabelWithString:
+            "Речь распознаётся в облаке ElevenLabs Scribe — точная пунктуация и тихий голос. " +
+            "Впишите свой ключ с elevenlabs.io (Profile → API Keys). Ключ хранится только у вас, в config.json.")
+        sttHint.font = .systemFont(ofSize: 11)
+        sttHint.textColor = .tertiaryLabelColor
+        sttHint.preferredMaxLayoutWidth = 512
+        let sttBody = NSStackView(views: [sttForm, sttHint])
+        sttBody.orientation = .vertical; sttBody.alignment = .leading; sttBody.spacing = 10
+
         let cardMain = card(nil, form)
+        let cardSTT = card("Распознавание речи", sttBody)
         let cardAI = card("Переписывание и ответы", aiBody)
         let cardHist = card("Последние диктовки", histBody)
         let cardPerms = card("Разрешения", perms)
 
-        let root = NSStackView(views: [header, cardMain, cardAI, cardHist, cardPerms, bar, hint])
+        let root = NSStackView(views: [header, cardMain, cardSTT, cardAI, cardHist, cardPerms, bar, hint])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 16
         root.edgeInsets = NSEdgeInsets(top: 44, left: 24, bottom: 24, right: 24)  // верх — под кнопками окна
-        for c in [cardMain, cardAI, cardHist, cardPerms] {
+        for c in [cardMain, cardSTT, cardAI, cardHist, cardPerms] {
             c.widthAnchor.constraint(equalToConstant: 600).isActive = true
         }
         return root
@@ -501,6 +525,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         updateVariantsLabels()
         trailingBox.state = c.trailingSpace ? .on : .off
         fixCmdBox.state = c.fixCommandEndings ? .on : .off
+        sttBox.state = c.sttEnabled ? .on : .off
+        if sttKeyField.currentEditor() == nil { sttKeyField.stringValue = c.sttApiKey }
         rewriteBox.state = c.rewriteEnabled ? .on : .off
         providerPopup.selectItem(at: rewriteProviders.firstIndex { $0.id == c.rewriteApiProvider } ?? 0)
         if keyField.currentEditor() == nil { keyField.stringValue = c.rewriteApiKey }
@@ -712,6 +738,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         if apiModel != app.config.rewriteApiModel { updates["rewrite_api_model"] = apiModel }
         let kw = keywordField.stringValue.trimmingCharacters(in: .whitespaces)
         if kw != app.config.rewriteKeyword { updates["rewrite_keyword"] = kw }
+        let sttKey = sttKeyField.stringValue.trimmingCharacters(in: .whitespaces)
+        if sttKey != app.config.sttApiKey { updates["stt_api_key"] = sttKey }
         if !updates.isEmpty { app.apply(updates) }
     }
 
@@ -728,6 +756,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
     @objc private func fixCmdChanged() {
         guard !updating else { return }
         app.apply(["fix_command_endings": fixCmdBox.state == .on])
+    }
+
+    @objc private func sttToggled() {
+        guard !updating else { return }
+        app.apply(["stt_enabled": sttBox.state == .on])
+        if sttBox.state == .on, sttKeyField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            status.stringValue = "Впишите ключ ElevenLabs, иначе распознавание не заработает"
+        }
     }
 
     /// Выключено — служба доживает до выхода из системы и больше не стартует; включено — стартует при входе
