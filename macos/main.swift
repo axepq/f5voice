@@ -1580,9 +1580,10 @@ final class App: NSObject, NSApplicationDelegate {
         let saved = pb.string(forType: .string)
         let src = CGEventSource(stateID: .combinedSessionState)
         let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)   // 0x08 = C
-        down?.flags = .maskCommand; down?.post(tap: .cghidEventTap)
+        down?.flags = .maskCommand; down?.post(tap: .cgSessionEventTap)   // тот же tap, что и печать текста — модификатор Cmd доходит до приложения
+        usleep(8000)
         let up = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
-        up?.flags = .maskCommand; up?.post(tap: .cghidEventTap)
+        up?.flags = .maskCommand; up?.post(tap: .cgSessionEventTap)
         var got: String?
         for _ in 0..<16 {                 // ждём, пока приложение реально скопирует (до ~800 мс)
             usleep(50_000)
