@@ -1785,8 +1785,6 @@ final class VariantsPanel: NSObject {
     private let root = NSStackView()
     private var scrollHeight: NSLayoutConstraint!
     private var rowWidth: CGFloat = 600
-    private let sheenTop = CAGradientLayer()   // верхний световой блик — сублой самого стекла
-    private let rimLayer = CALayer()           // светлая кромка — сублой самого стекла
     private var glassView: NSView!          // внутреннее стекло — анимируем его фрейм (капля -> блок)
     private var keyMonitor: Any?
     private(set) var variantTexts: [String] = []
@@ -1882,17 +1880,6 @@ final class VariantsPanel: NSObject {
         glassView.layer?.shadowOpacity = 0.32
         glassView.layer?.shadowRadius = 20
         glassView.layer?.shadowOffset = CGSize(width: 0, height: -8)
-        // Блик и кромка — сублоями самого стекла: двигаются и тянутся как единое целое (без второго кружка).
-        sheenTop.colors = [NSColor(white: 1, alpha: 0.30).cgColor, NSColor(white: 1, alpha: 0.06).cgColor, NSColor(white: 1, alpha: 0.0).cgColor]
-        sheenTop.locations = [0, 0.16, 0.46]
-        sheenTop.startPoint = CGPoint(x: 0.5, y: 1); sheenTop.endPoint = CGPoint(x: 0.5, y: 0)
-        sheenTop.cornerRadius = 28
-        sheenTop.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        rimLayer.cornerRadius = 28
-        rimLayer.borderWidth = 1; rimLayer.borderColor = NSColor(white: 1, alpha: 0.20).cgColor
-        rimLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        glassView.layer?.addSublayer(sheenTop)
-        glassView.layer?.addSublayer(rimLayer)
         panel.contentView = container
     }
 
@@ -1933,12 +1920,6 @@ final class VariantsPanel: NSObject {
         func bead(_ w: CGFloat, _ hh: CGFloat, _ ccx: CGFloat, _ ccy: CGFloat) -> NSRect {
             NSRect(x: ccx - w / 2, y: ccy - hh / 2, width: w, height: hh)
         }
-        // Блик и кромка мгновенно подгоняются под текущую форму стекла (без своей анимации).
-        func syncSub() {
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            sheenTop.frame = glassView.bounds; rimLayer.frame = glassView.bounds
-            CATransaction.commit()
-        }
         // Жидкий путь (макс. желе, очень плавно): сильно вытянутая слеза снизу -> медленный подъём
         // -> сбор в круг по центру -> сильный разлив шире блока -> длинное затухающее желе в блок.
         // Скорость и желейность — из настроек (пользователь крутит ползунками).
@@ -1963,14 +1944,14 @@ final class VariantsPanel: NSObject {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = dur; ctx.timingFunction = tf
                 self.glassView.animator().frame = r
-            }, completionHandler: { syncSub(); done() })
+            }, completionHandler: { done() })
         }
         let smooth = CAMediaTimingFunction(name: .easeInEaseOut)
 
         let already = panel.isVisible
         if !already {
             panel.setFrame(win, display: false)          // окно фиксировано на весь путь
-            glassView.frame = f0; syncSub()               // старт: вытянутая капля внизу по центру
+            glassView.frame = f0               // старт: вытянутая капля внизу по центру
             panel.alphaValue = 0
             root.alphaValue = 0
             panel.makeKeyAndOrderFront(nil)
@@ -2003,7 +1984,7 @@ final class VariantsPanel: NSObject {
                 ctx.duration = 0.24
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
                 self.glassView.animator().frame = blockLocal
-            }, completionHandler: { syncSub() })
+            })
         }
     }
 
