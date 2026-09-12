@@ -829,14 +829,14 @@ final class HUD {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 50),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
-        panel.level = .statusBar
+        panel.level = .screenSaver   // выше полноэкранных приложений (VS Code fullscreen и т.п.) — плашка поверх всего
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false   // оконная тень видна тёмным ореолом на светлом фоне — убираем
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
         let bounds = panel.contentView!.bounds
         let content = NSView(frame: bounds)
@@ -1803,13 +1803,13 @@ final class VariantsPanel: NSObject {
                                styleMask: [.borderless], backing: .buffered, defer: false)
         super.init()
         panel.isFloatingPanel = true
-        panel.level = .floating
+        panel.level = .screenSaver   // поверх полноэкранных приложений, как плашка записи
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false   // тень рисует само стекло (следует за формой капли)
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.appearance = NSAppearance(named: .darkAqua)
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel, queue: .main) { [weak self] _ in
             self?.removeKeyMonitor()
@@ -1946,7 +1946,6 @@ final class VariantsPanel: NSObject {
         let sc = 1.0 / max(0.5, cfg.variantsSpeed)         // множитель длительностей: больше скорость -> меньше
         let jK = cfg.variantsJelly                          // желейность 0..1
         let f0 = bead(30, 74, cx, 44)                      // сильно вытянутая слеза, у самого низа
-        let f1 = bead(38, 62, cx, cy * 0.55)               // поднимается, ещё слезой
         let f2 = bead(60, 58, cx, cy)                      // собралась в круг по центру
         func spill(_ dw: CGFloat, _ dh: CGFloat) -> NSRect {   // отклонение формы от блока: dw шире, dh выше
             NSRect(x: blockLocal.minX - dw / 2, y: blockLocal.minY - dh / 2,
@@ -1956,7 +1955,7 @@ final class VariantsPanel: NSObject {
         let spread = CGFloat(16 + 48 * jK)
         let f3 = spill(spread, -spread)
         let baseAmp: [CGFloat] = [-42, 30, -20, 12, -5]     // чередование шире/уже, падающая амплитуда
-        let steps = max(1, Int((1 + 5 * jK).rounded()))
+        let steps = max(1, min(3, Int((1 + 3 * jK).rounded())))   // меньше колыханий — плавнее, без дёрганья
         let amp = CGFloat(0.5 + 0.5 * jK)
         let jelly: [NSRect] = baseAmp.prefix(steps).map { spill($0 * amp, -$0 * amp) } + [blockLocal]
         let jellyDur: [Double] = Array(repeating: 0.3 * sc, count: baseAmp.prefix(steps).count + 1)
@@ -1986,16 +1985,14 @@ final class VariantsPanel: NSObject {
                 guard i < jelly.count else { return }
                 stepFrame(jelly[i], jellyDur[i], smooth) { settle(i + 1) }
             }
-            stepFrame(f1, 0.9 * sc, smooth) {                // плавный подъём
-                stepFrame(f2, 0.72 * sc, smooth) {           // мягкий сбор в круг
-                    stepFrame(f3, 0.56 * sc, CAMediaTimingFunction(controlPoints: 0.25, 0.75, 0.2, 1)) {  // разлив
-                        settle(0)
-                    }
-                    NSAnimationContext.runAnimationGroup { ctx in                                  // текст проявляется на распускании
-                        ctx.duration = 0.6 * sc
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        self.root.animator().alphaValue = 1
-                    }
+            stepFrame(f2, 1.0 * sc, smooth) {                // подъём и сбор в круг одним плавным движением
+                stepFrame(f3, 0.5 * sc, CAMediaTimingFunction(controlPoints: 0.25, 0.75, 0.2, 1)) {  // разлив
+                    settle(0)
+                }
+                NSAnimationContext.runAnimationGroup { ctx in                                  // текст проявляется на распускании
+                    ctx.duration = 0.6 * sc
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.root.animator().alphaValue = 1
                 }
             }
         } else {
