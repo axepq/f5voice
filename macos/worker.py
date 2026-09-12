@@ -315,7 +315,7 @@ def main():
             want_variants = False
             if active:
                 text2, want_variants, over_text = rewrite.strip_variants(text)
-                body, cmd = rewrite.split_command(text2, rw["commands"], rw["keyword"])
+                body, cmd = rewrite.split_command(text2, rw["commands"], rw["keyword"], auto=False)
             else:
                 body, cmd, over_text = text, None, False
             if want_variants and use_api(rw):  # показать несколько вариантов вместо вставки

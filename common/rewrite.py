@@ -5,12 +5,12 @@
 в macos/llm.py, эта часть работает и тестируется на любой ОС.
 
 «…скиньте до пятницы. Официальный стиль» → («…скиньте до пятницы.», команда official)
-«…до пятницы. Команда: сделай списком»    → («…до пятницы.», свободная инструкция)
+«…до пятницы. Перепиши, сделай списком»  → («…до пятницы.», свободная инструкция)
 """
 import re
 
 DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-DEFAULT_KEYWORD = "команда"
+DEFAULT_KEYWORD = "перепиши"
 DEFAULT_SELECTION_KEYWORD = "правка"   # слово в начале фразы для правки выделенного текста
 DEFAULT_IDLE_MINUTES = 1
 ANSWER_MODEL = "mlx-community/Mistral-Nemo-Instruct-2407-4bit"   # ответы: живее в языке, вольнее в тоне, хороший русский
@@ -151,10 +151,12 @@ def _free_style(text, commands):
     return None
 
 
-def split_command(text, commands=None, keyword=DEFAULT_KEYWORD):
+def split_command(text, commands=None, keyword=DEFAULT_KEYWORD, auto=True):
     """(текст без команды, команда) или (text, None). Команда — только в самом конце
-    и только если перед ней есть текст. Ключевое слово проверяется первым: в «команда: короче»
-    тело — то, что до ключевого слова, а не до «короче»."""
+    и только если перед ней есть текст. Ключевое слово проверяется первым: в «перепиши: короче»
+    тело — то, что до ключевого слова, а не до «короче».
+    auto=False (живая диктовка) — переписываем ТОЛЬКО по слову-маркеру, без угадывания стиля
+    по фразе в конце; auto=True (разбор явного триггера, кнопка «Проверить») — угадывание включено."""
     text = (text or "").strip()
     commands = commands if commands is not None else COMMANDS
     if keyword:
@@ -172,6 +174,8 @@ def split_command(text, commands=None, keyword=DEFAULT_KEYWORD):
                     return body, known[1]
                 return body, {"key": "free", "title": instruction.rstrip(".!?…").strip()[:60],
                               "instruction": instruction, "rude": _is_rude(instruction)}
+    if not auto:                       # живая диктовка: только маркер, без угадывания стиля по фразе
+        return text, None
     found = _fixed(text, commands)
     if found:
         return found

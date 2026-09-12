@@ -101,7 +101,7 @@ struct Config {
     var rewriteApiModel = ""
     var rewriteModel = ""                    // локальная модель (по умолчанию выключена, код цел)
     var rewriteIdleMinutes = 1.0
-    var rewriteKeyword = "команда"
+    var rewriteKeyword = "перепиши"
     var selectionKeyword = "правка"   // слово-маркер для правки выделенного текста
     var rewriteCommands: [(triggers: String, instruction: String)] = []  // свои стили, порядок как в файле
     var answerModel = ""    // ответы выключены по умолчанию; включаются галочкой (тогда берётся Nemo)

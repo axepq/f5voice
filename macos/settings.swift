@@ -354,8 +354,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         apiModelField.placeholderString = "deepseek-chat"
         apiModelField.toolTip = "Имя модели у провайдера, например deepseek-chat или grok-3"
         keywordField.widthAnchor.constraint(equalToConstant: 140).isActive = true
-        keywordField.placeholderString = "команда"
-        keywordField.toolTip = "«…текст. Команда: сделай списком» — после этого слова идёт своя инструкция модели"
+        keywordField.placeholderString = "перепиши"
+        keywordField.toolTip = "Надиктуй текст, потом скажи это слово и инструкцию: «…текст. перепиши, сделай короче». Только по нему текст переписывается (без угадывания стиля по фразе)"
         let aiForm = NSGridView(views: [
             [NSGridCell.emptyContentView, toggleRow(rewriteBox, "Переписывать текст по команде в конце фразы")],
             [label("Провайдер"), providerPopup],
