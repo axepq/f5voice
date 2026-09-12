@@ -88,6 +88,10 @@ struct Config {
     var variantsSpeed = 1.3             // скорость превращения капли в блок (больше = быстрее)
     var variantsJelly = 0.4             // желейность оседания (0 — почти без колыхания, 1 — максимум)
     var fixCommandEndings = false       // чинить окончания команд, спутанные Whisper (сделаю→сделай)
+    var sttEnabled = false              // облачное распознавание речи (ElevenLabs Scribe) вместо локального Whisper
+    var sttProvider = "elevenlabs"
+    var sttApiKey = ""
+    var sttModel = "scribe_v1"
     // Переписывание через облачный API (DeepSeek/Grok/…). Читает воркер из config.json; здесь — для окна настроек.
     var rewriteEnabled = true
     var rewriteApiProvider = "deepseek"
@@ -148,6 +152,10 @@ struct Config {
         if let v = obj["variants_speed"] as? Double { c.variantsSpeed = min(max(v, 0.5), 2.5) }
         if let v = obj["variants_jelly"] as? Double { c.variantsJelly = min(max(v, 0.0), 1.0) }
         if let v = obj["fix_command_endings"] as? Bool { c.fixCommandEndings = v }
+        if let v = obj["stt_enabled"] as? Bool { c.sttEnabled = v }
+        if let v = obj["stt_provider"] as? String { c.sttProvider = v }
+        if let v = obj["stt_api_key"] as? String { c.sttApiKey = v }
+        if let v = obj["stt_model"] as? String, !v.isEmpty { c.sttModel = v }
         if let v = obj["rewrite_model"] as? String { c.rewriteModel = v }
         if let v = obj["rewrite_enabled"] as? Bool { c.rewriteEnabled = v }
         if let v = obj["rewrite_api_provider"] as? String { c.rewriteApiProvider = v }

@@ -60,6 +60,7 @@ from common import rewrite  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from llm import Rewriter  # noqa: E402
 import apillm  # noqa: E402
+import sttapi  # noqa: E402
 
 HOME_DIR = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 
@@ -137,6 +138,20 @@ def fix_cmd_enabled():
             return bool(json.load(f).get("fix_command_endings", False))
     except (OSError, ValueError):
         return False
+
+
+def stt_settings():
+    """Настройки облачного распознавания речи из config.json (по умолчанию выключено)."""
+    try:
+        with open(HOME_DIR / "config.json", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    key = str(cfg.get("stt_api_key") or "")
+    return {"enabled": bool(cfg.get("stt_enabled", False)) and bool(key),
+            "provider": str(cfg.get("stt_provider") or "elevenlabs"),
+            "key": key, "model": str(cfg.get("stt_model") or ""),
+            "language": str(cfg.get("languages") or "")}
 
 
 def use_api(rw):
@@ -325,7 +340,22 @@ def main():
             if quiet:
                 out({"text": "", "reason": "silence", "dur": dur, "speech": speech})
                 continue
-            text, lang, scores, fixed = recognize(audio)
+            stt = stt_settings()
+            text = None
+            if stt["enabled"]:
+                try:
+                    out({"status": "download", "command": "облачное распознавание"})
+                    raw = sttapi.transcribe(path, stt["key"], stt["model"], stt["language"], stt["provider"])
+                    text = finalize(raw, PROMPT)
+                    if fix_cmd_enabled():
+                        text = fix_command_endings(text)
+                    lang, scores, fixed = "scribe", {}, 0
+                    log(f"облачный STT ({stt['provider']}): {text[:200]}")
+                except Exception as e:  # noqa: BLE001
+                    log(f"облачный STT не сработал ({e}) — падаю на локальный Whisper")
+                    text = None
+            if text is None:
+                text, lang, scores, fixed = recognize(audio)
             extra = {}
             rw = rewrite_settings()
             asked = rewrite.split_answer(text, rw["answer_keyword"], rw["personas"]) if rw["answer_model"] or use_api(rw) else None
