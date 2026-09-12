@@ -344,7 +344,6 @@ def main():
             text = None
             if stt["enabled"]:
                 try:
-                    out({"status": "download", "command": "облачное распознавание"})
                     raw = sttapi.transcribe(path, stt["key"], stt["model"], stt["language"], stt["provider"])
                     text = finalize(raw, PROMPT)
                     if fix_cmd_enabled():

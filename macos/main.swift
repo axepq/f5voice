@@ -1576,17 +1576,20 @@ final class App: NSObject, NSApplicationDelegate {
     /// Скопировать выделенный текст из активного приложения (Cmd+C) и вернуть его; буфер обмена восстанавливаем.
     private func copySelection() -> String? {
         let pb = NSPasteboard.general
+        let before = pb.changeCount
         let saved = pb.string(forType: .string)
-        pb.clearContents()
         let src = CGEventSource(stateID: .combinedSessionState)
         let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)   // 0x08 = C
         down?.flags = .maskCommand; down?.post(tap: .cghidEventTap)
         let up = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
         up?.flags = .maskCommand; up?.post(tap: .cghidEventTap)
-        usleep(160_000)   // дать приложению положить выделение в буфер
-        let sel = pb.string(forType: .string)
+        var got: String?
+        for _ in 0..<16 {                 // ждём, пока приложение реально скопирует (до ~800 мс)
+            usleep(50_000)
+            if pb.changeCount != before { got = pb.string(forType: .string); break }
+        }
         if let saved = saved { pb.clearContents(); pb.setString(saved, forType: .string) }  // вернуть прежний буфер
-        return sel
+        return got
     }
 
     private func startRecording() {
