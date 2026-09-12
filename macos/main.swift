@@ -16,6 +16,7 @@
 // Сборка: macos/build.sh   Настройки: ~/.f5voice/config.json   Лог: ~/.f5voice/f5voice.log
 
 import AVFoundation
+import ApplicationServices
 import Cocoa
 import CoreAudio
 import Symbols
@@ -1574,21 +1575,51 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     /// Скопировать выделенный текст из активного приложения (Cmd+C) и вернуть его; буфер обмена восстанавливаем.
+    /// Прочитать выделение через Accessibility (kAXSelectedText) — без буфера и клавиш.
+    private func selectedTextViaAX() -> String? {
+        let system = AXUIElementCreateSystemWide()
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused else { log("AX: нет сфокусированного элемента"); return nil }
+        let axel = element as! AXUIElement
+        var sel: AnyObject?
+        let err = AXUIElementCopyAttributeValue(axel, kAXSelectedTextAttribute as CFString, &sel)
+        if err == .success, let s = sel as? String, !s.isEmpty {
+            log("AX: выделение получено, \(s.count) символов")
+            return s
+        }
+        log("AX: kAXSelectedText недоступен (код \(err.rawValue))")
+        return nil
+    }
+
     private func copySelection() -> String? {
+        let front = NSWorkspace.shared.frontmostApplication
+        log("copySelection: активное приложение = \(front?.bundleIdentifier ?? "?") (\(front?.localizedName ?? "?"))")
+        if let ax = selectedTextViaAX() { return ax }   // основной путь — читаем выделение напрямую
         let pb = NSPasteboard.general
         let before = pb.changeCount
         let saved = pb.string(forType: .string)
+        // Явно нажимаем и удерживаем ⌘, затем C — только флаг .maskCommand на событии C
+        // Telegram не воспринимает как аккорд (буфер не менялся). Держим модификатор клавишей.
         let src = CGEventSource(stateID: .combinedSessionState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)   // 0x08 = C
-        down?.flags = .maskCommand; down?.post(tap: .cgSessionEventTap)   // тот же tap, что и печать текста — модификатор Cmd доходит до приложения
-        usleep(8000)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
-        up?.flags = .maskCommand; up?.post(tap: .cgSessionEventTap)
+        let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: 0x37, keyDown: true)  // 0x37 = ⌘ (left Command)
+        cmdDown?.flags = .maskCommand; cmdDown?.post(tap: .cgSessionEventTap)
+        usleep(5000)
+        let cDown = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)    // 0x08 = C
+        cDown?.flags = .maskCommand; cDown?.post(tap: .cgSessionEventTap)
+        usleep(5000)
+        let cUp = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
+        cUp?.flags = .maskCommand; cUp?.post(tap: .cgSessionEventTap)
+        usleep(5000)
+        let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: 0x37, keyDown: false)
+        cmdUp?.flags = []; cmdUp?.post(tap: .cgSessionEventTap)
         var got: String?
+        var waited = 0
         for _ in 0..<16 {                 // ждём, пока приложение реально скопирует (до ~800 мс)
-            usleep(50_000)
+            usleep(50_000); waited += 1
             if pb.changeCount != before { got = pb.string(forType: .string); break }
         }
+        log("copySelection: changeCount \(before)→\(pb.changeCount) за \(waited)×50мс, получено \(got?.count ?? -1) символов, типы буфера: \(pb.types?.map { $0.rawValue } ?? [])")
         if let saved = saved { pb.clearContents(); pb.setString(saved, forType: .string) }  // вернуть прежний буфер
         return got
     }
