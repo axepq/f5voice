@@ -112,5 +112,32 @@ class History(unittest.TestCase):
         self.assertEqual([i["text"] for i in history.load(path)], ["б"])
 
 
+class StripFillers(unittest.TestCase):
+    """Слова-хезитации от облачного STT (э-э-э, ммм) режем, реальные слова не трогаем."""
+
+    def test_leading_filler_removed_and_capitalized(self):
+        self.assertEqual(textproc.strip_fillers("Э-э-э, поменяй текст"), "Поменяй текст")
+        self.assertEqual(textproc.strip_fillers("эээ проверка связи"), "Проверка связи")
+
+    def test_mid_and_trailing_fillers_removed(self):
+        self.assertEqual(textproc.strip_fillers("Сделай короче, м-м-м, и понятнее"),
+                         "Сделай короче, и понятнее")
+        self.assertEqual(textproc.strip_fillers("Готово ммм"), "Готово")
+
+    def test_real_words_and_conjunctions_kept(self):
+        self.assertEqual(textproc.strip_fillers("Это тот текст"), "Это тот текст")
+        self.assertEqual(textproc.strip_fillers("а я думаю это важно"), "а я думаю это важно")
+        self.assertEqual(textproc.strip_fillers("мама мыла раму"), "мама мыла раму")
+
+    def test_case_untouched_without_leading_filler(self):
+        # без ведущего филлера регистр не меняем — иначе ломаются e-mail и код
+        self.assertEqual(textproc.finalize("массив arr[0] и [1]"), "массив arr[0] и [1]")
+        self.assertEqual(textproc.finalize("alex собака gmail точка Com"), "alex@gmail.com")
+
+    def test_empty_and_none(self):
+        self.assertEqual(textproc.strip_fillers(""), "")
+        self.assertIsNone(textproc.strip_fillers(None))
+
+
 if __name__ == "__main__":
     unittest.main()

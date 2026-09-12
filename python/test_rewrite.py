@@ -92,10 +92,10 @@ class SplitCommand(unittest.TestCase):
         self.assertEqual((body, cmd["key"]), ("Скиньте договор до пятницы", "official"))
 
     def test_keyword_after_comma_needs_colon(self):
-        for text in ("Привет, команда, как дела?", "Всем привет, команда собирается в пять.",
-                     "Наша компания, команда разработчиков сделает всё"):
+        for text in ("Привет, перепиши, как дела?", "Всем привет, перепиши всё к пяти.",
+                     "Наша компания перепишет договор в срок"):
             self.assertEqual(rewrite.split_command(text), (text, None), text)
-        body, cmd = rewrite.split_command("Скиньте до пятницы, команда: сделай списком.")
+        body, cmd = rewrite.split_command("Скиньте до пятницы, перепиши: сделай списком.")
         self.assertEqual((body, cmd["key"]), ("Скиньте до пятницы", "free"))
 
     def test_command_alone_is_plain_text(self):
@@ -107,7 +107,7 @@ class SplitCommand(unittest.TestCase):
         self.assertEqual(rewrite.split_command(text), (text, None))
 
     def test_free_instruction_after_keyword(self):
-        body, cmd = rewrite.split_command("Скиньте до пятницы. Команда: сделай списком и без грубости.")
+        body, cmd = rewrite.split_command("Скиньте до пятницы. Перепиши: сделай списком и без грубости.")
         self.assertEqual(body, "Скиньте до пятницы.")
         self.assertEqual(cmd["key"], "free")
         self.assertEqual(cmd["instruction"], "сделай списком и без грубости.")
@@ -118,7 +118,7 @@ class SplitCommand(unittest.TestCase):
         self.assertEqual(rewrite.split_command(text), (text, None))
 
     def test_keyword_needs_instruction(self):
-        text = "Скиньте до пятницы. Команда."
+        text = "Скиньте до пятницы. Перепиши."
         self.assertEqual(rewrite.split_command(text), (text, None))
 
     def test_custom_keyword(self):
@@ -126,7 +126,7 @@ class SplitCommand(unittest.TestCase):
         self.assertEqual((body, cmd["key"]), ("Текст.", "free"))
 
     def test_keyword_with_builtin_trigger_is_builtin(self):
-        body, cmd = rewrite.split_command("Текст. Команда: короче.")
+        body, cmd = rewrite.split_command("Текст. Перепиши: короче.")
         self.assertEqual((body, cmd["key"]), ("Текст.", "shorter"))
 
     def test_user_commands_extend_and_override(self):
@@ -151,7 +151,7 @@ class BuildMessages(unittest.TestCase):
         self.assertIn("Текст: Текст.", msgs[1]["content"])
 
     def test_free_instruction_goes_as_task(self):
-        _, cmd = rewrite.split_command("Текст. Команда: сделай списком.")
+        _, cmd = rewrite.split_command("Текст. Перепиши: сделай списком.")
         msgs = rewrite.build_messages("Текст.", cmd)
         self.assertIn("сделай списком", msgs[1]["content"])
 
@@ -189,7 +189,7 @@ class Accept(unittest.TestCase):
     def setUp(self):
         self.official = rewrite.split_command("Текст. Официально.")[1]
         self.shorter = rewrite.split_command("Текст. Короче.")[1]
-        self.free = rewrite.split_command("Текст. Команда: убери всё лишнее.")[1]
+        self.free = rewrite.split_command("Текст. Перепиши: убери всё лишнее.")[1]
         self.original = "Привет, слушай, я по поводу вчерашнего договора, там цифра не та, поправьте."
 
     def test_empty_rejected(self):
@@ -307,6 +307,62 @@ class Variants(unittest.TestCase):
         self.assertEqual(rewrite.parse_variants('Вот варианты:\n["раз", "два"]'), ["раз", "два"])
         self.assertEqual(rewrite.parse_variants("1. раз\n2. два\n3. три"), ["раз", "два", "три"])
         self.assertEqual(rewrite.parse_variants(""), [])
+
+
+class SelectionMarker(unittest.TestCase):
+    """Правка ВЫДЕЛЕННОГО текста запускается только словом-маркером в начале фразы."""
+
+    def test_marker_returns_instruction_after_it(self):
+        self.assertEqual(rewrite.selection_instruction("Правка, сделай официальным и короче"),
+                         "сделай официальным и короче")
+        self.assertEqual(rewrite.selection_instruction("правка: переведи на английский"),
+                         "переведи на английский")
+
+    def test_marker_without_comma(self):
+        self.assertEqual(rewrite.selection_instruction("Правка сделай короче"), "сделай короче")
+
+    def test_no_marker_is_none(self):
+        # раньше это ложно включало режим — теперь без маркера не трогаем
+        self.assertIsNone(rewrite.selection_instruction("Измени выделенный текст на официальный"))
+        self.assertIsNone(rewrite.selection_instruction("Выделенный текст он не видит"))
+        self.assertIsNone(rewrite.selection_instruction("Расскажи про правку документов"))
+
+    def test_marker_alone_without_instruction_is_none(self):
+        self.assertIsNone(rewrite.selection_instruction("Правка"))
+        self.assertIsNone(rewrite.selection_instruction("Правка."))
+
+    def test_custom_keyword(self):
+        self.assertEqual(rewrite.selection_instruction("Стиль, сделай короче", keyword="стиль"),
+                         "сделай короче")
+        self.assertIsNone(rewrite.selection_instruction("Правка, сделай короче", keyword="стиль"))
+
+
+class LiveDictation(unittest.TestCase):
+    """Живая диктовка (auto=False): переписываем ТОЛЬКО по маркеру, без угадывания стиля по фразе."""
+
+    def test_marker_triggers_free_rewrite(self):
+        body, cmd = rewrite.split_command("Привет, как дела. Перепиши, сделай официальным.",
+                                          keyword="перепиши", auto=False)
+        self.assertEqual(body, "Привет, как дела.")
+        self.assertEqual(cmd["key"], "free")
+        self.assertIn("сделай официальным", cmd["instruction"])
+
+    def test_builtin_phrase_not_autodetected_without_marker(self):
+        # ключевая правка этой сессии: «сделай короче»/«официальный стиль» без маркера — обычный текст
+        for text in ("Отправь отчёт до пятницы официальным стилем",
+                     "Сделай мне кофе и сделай короче",
+                     "Убери слова-паразиты из этого предложения"):
+            self.assertEqual(rewrite.split_command(text, keyword="перепиши", auto=False), (text, None), text)
+
+    def test_marker_resolves_builtin(self):
+        body, cmd = rewrite.split_command("Текст письма. Перепиши: официальный стиль.",
+                                          keyword="перепиши", auto=False)
+        self.assertEqual((body, cmd["key"]), ("Текст письма.", "official"))
+
+    def test_trigger_resolver_still_works_with_auto(self):
+        # кнопка «Проверить» в настройках разбирает явный триггер (auto=True по умолчанию)
+        _, cmd = rewrite.split_command("x. официальный стиль")
+        self.assertEqual(cmd["key"], "official")
 
 
 if __name__ == "__main__":
