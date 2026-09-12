@@ -140,7 +140,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, NSTextFieldDelegate, NST
         timer?.invalidate()
         timer = nil
         commitFields()
+        // Смену .regular -> .accessory у активного приложения AppKit применяет не сразу, и процесс
+        // остаётся «полу-regular»: тогда окна-оверлеи перестают ложиться поверх ЧУЖОГО fullscreen
+        // (VS Code fullscreen). Приём .prohibited -> .accessory + deactivate заставляет применить сразу.
+        NSApp.setActivationPolicy(.prohibited)
         NSApp.setActivationPolicy(.accessory)
+        NSApp.deactivate()
     }
 
     // MARK: Вид

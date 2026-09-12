@@ -836,7 +836,7 @@ final class HUD {
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
 
         let bounds = panel.contentView!.bounds
         let content = NSView(frame: bounds)
@@ -954,6 +954,7 @@ final class HUD {
         let target = panel.frame
         panel.alphaValue = 0
         panel.setFrame(target.offsetBy(dx: 0, dy: -10), display: false)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]  // пере-синхрон перед показом
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.3
@@ -983,7 +984,8 @@ final class HUD {
         let labelW = min(label.frame.width, 620)
         label.frame = NSRect(x: x, y: (height - label.frame.height) / 2, width: labelW, height: label.frame.height)
         let w = x + labelW + pad + 2
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) })
+            ?? NSScreen.main ?? NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
         let target = NSRect(x: vf.midX - w / 2, y: vf.minY + 48, width: w, height: height)
         let animated = panel.isVisible && !hiding && panel.alphaValue > 0.99 && abs(panel.frame.width - w) > 0.5
@@ -1798,7 +1800,7 @@ final class VariantsPanel: NSObject {
 
     override init() {
         panel = VariantsWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 240),
-                               styleMask: [.borderless], backing: .buffered, defer: false)
+                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         panel.isFloatingPanel = true
         panel.level = .screenSaver   // поверх полноэкранных приложений, как плашка записи
@@ -1807,7 +1809,7 @@ final class VariantsPanel: NSObject {
         panel.hasShadow = false   // тень рисует само стекло (следует за формой капли)
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.appearance = NSAppearance(named: .darkAqua)
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel, queue: .main) { [weak self] _ in
             self?.removeKeyMonitor()
@@ -1954,8 +1956,8 @@ final class VariantsPanel: NSObject {
             glassView.frame = f0               // старт: вытянутая капля внизу по центру
             panel.alphaValue = 0
             root.alphaValue = 0
-            panel.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]  // пере-синхрон Space
+            panel.makeKeyAndOrderFront(nil)   // .nonactivatingPanel + canBecomeKey: фокус без активации приложения (как Spotlight) — не уводит с fullscreen-Space
             installKeyMonitor()
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.34
