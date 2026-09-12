@@ -258,9 +258,35 @@ def collapse_repeats(text, min_words=2, max_words=10):
     return result if result else ""
 
 
+# Слова-хезитации («э-э-э», «ммм», «а-а», протяжное «ну-у») — облачный STT (ElevenLabs
+# Scribe) их транскрибирует. Режем только не-слова из э/м + протяжные, по границам слова,
+# чтобы не задеть «это/эти», союз «а», «и», «о» и т.п.
+_FILLER = re.compile(
+    r"(?<![а-яёa-z])"
+    r"(?:э(?:[-\s]?э)+|э{2,}|м(?:[-\s]?м)+|м{2,}|э[-\s]?м+|а(?:[-\s]?а)+|ну-у+|о-о+)"
+    r"(?![а-яёa-z])"
+    r"[\s,]*",                         # заодно съедаем хвостовые пробелы/запятые филлера
+    re.IGNORECASE)
+
+
+def strip_fillers(text):
+    """Убрать слова-хезитации и подчистить осевшую пунктуацию/пробелы."""
+    if not text:
+        return text
+    t = _FILLER.sub("", text)
+    t = re.sub(r"\s+", " ", t)                    # схлопнуть пробелы
+    t = re.sub(r"\s+([,.!?…:;])", r"\1", t)       # пробел перед пунктуацией
+    t = re.sub(r"([,;:])(?=[,.;:!?])", "", t)     # дубли пунктуации «,,» «,.»
+    t = re.sub(r"^[\s,;:—–-]+", "", t)            # ведущий мусор
+    t = t.strip()
+    if t and t[0].islower():                      # филлер съел начало предложения — вернуть заглавную
+        t = t[0].upper() + t[1:]
+    return t
+
+
 def finalize(text, prompt=DEFAULT_PROMPT):
     """Полная обработка сырого текста модели."""
-    return apply_commands(collapse_repeats(clean(text, prompt)))
+    return apply_commands(collapse_repeats(clean(strip_fillers(text), prompt)))
 
 
 # Частая ошибка Whisper по-русски: команду в повелительном слышит как 1-е лицо будущего
