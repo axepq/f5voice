@@ -17,6 +17,7 @@
 
 import AVFoundation
 import Cocoa
+import CoreAudio
 import Symbols
 
 // MARK: - Пути и настройки
@@ -1510,29 +1511,49 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     // Пауза музыки на время диктовки, чтобы звук из колонок не попадал в запись.
-    private var pausedMediaApps: [String] = []
+    // Универсально через медиа-клавишу Play/Pause (её слушают Spotify, Music, браузер/YouTube и т.п.).
+    // Разрешение Automation не нужно — используется уже выданный Accessibility (как для F5).
+    private var didPauseMedia = false
 
-    private func runOSA(_ src: String) -> String? {
-        var err: NSDictionary?
-        let out = NSAppleScript(source: src)?.executeAndReturnError(&err)
-        return out?.stringValue
+    /// Играет ли сейчас звук на выходе (любой плеер/браузер) — чтобы не «включить» музыку зря.
+    private func systemAudioPlaying() -> Bool {
+        var dev = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev) == noErr else { return false }
+        var running = UInt32(0)
+        size = UInt32(MemoryLayout<UInt32>.size)
+        addr.mSelector = kAudioDevicePropertyDeviceIsRunningSomewhere
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &running) == noErr else { return false }
+        return running != 0
     }
 
-    private func pauseMediaForDictation() {
-        pausedMediaApps = []
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
-        let apps = [("Spotify", "com.spotify.client"), ("Music", "com.apple.Music")]
-        for (name, bundle) in apps where running.contains(bundle) {
-            // Одним событием: если играет — ставим на паузу и запоминаем, что это мы её остановили.
-            let src = "tell application \"\(name)\"\nif player state is playing then\npause\nreturn \"y\"\nend if\nreturn \"n\"\nend tell"
-            if runOSA(src) == "y" { pausedMediaApps.append(name) }
+    /// Отправить системную медиа-клавишу Play/Pause (NX_KEYTYPE_PLAY = 16).
+    private func sendPlayPauseKey() {
+        for down in [true, false] {
+            let data1 = Int((16 << 16) | ((down ? 0xA : 0xB) << 8))
+            let flags = NSEvent.ModifierFlags(rawValue: UInt(down ? 0xA00 : 0xB00))
+            if let ev = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: flags,
+                                           timestamp: 0, windowNumber: 0, context: nil,
+                                           subtype: 8, data1: data1, data2: -1) {
+                ev.cgEvent?.post(tap: .cghidEventTap)
+            }
         }
     }
 
+    private func pauseMediaForDictation() {
+        didPauseMedia = false
+        guard systemAudioPlaying() else { return }   // ничего не играет — не трогаем
+        sendPlayPauseKey()
+        didPauseMedia = true
+    }
+
     private func resumeMediaAfterDictation() {
-        let apps = pausedMediaApps
-        pausedMediaApps = []
-        for name in apps { _ = runOSA("if application \"\(name)\" is running then tell application \"\(name)\" to play") }
+        guard didPauseMedia else { return }
+        didPauseMedia = false
+        sendPlayPauseKey()   // повторное нажатие возобновляет то, что мы поставили на паузу
     }
 
     private func startRecording() {
