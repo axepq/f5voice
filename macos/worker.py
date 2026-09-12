@@ -286,6 +286,15 @@ def main():
                         continue
                     text, extra = do_rewrite(llm, rw, body, cmd)
                     out({"text": text, "sec": round(time.time() - t1, 2), **extra})
+                elif "rewrite_selection" in req:
+                    sel_text = str(req["rewrite_selection"].get("text") or "").strip()
+                    sel_instr = str(req["rewrite_selection"].get("instruction") or "").strip()
+                    if not sel_text or not sel_instr or not use_api(rw):
+                        out({"text": "", "error": "нет текста, команды или облачной модели"})
+                        continue
+                    cmd = rewrite.selection_command(sel_instr)
+                    text, extra = do_rewrite(llm, rw, sel_text, cmd)
+                    out({"text": text, "sec": round(time.time() - t1, 2), **extra})
                 elif "refine" in req and use_api(rw):
                     r = req["refine"]
                     variants = [str(v) for v in (r.get("variants") or [])]
@@ -344,6 +353,13 @@ def main():
                 last_use = time.time()
                 continue
             active = rw["enabled"] and (use_api(rw) or rw["model"])
+            # Сказана только команда над выделенным текстом («исправь этот текст…») — просим приложение
+            # скопировать выделение и прислать его на переписывание, вставленный текст не печатаем.
+            sel = rewrite.selection_instruction(text) if (active and use_api(rw)) else None
+            if sel:
+                out({"text": "", "selection_rewrite": sel})
+                last_use = time.time()
+                continue
             want_variants = False
             if active:
                 text2, want_variants, over_text = rewrite.strip_variants(text)

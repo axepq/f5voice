@@ -428,6 +428,7 @@ final class Worker {
         var variantStyle: String?
         var variantBody: String?    // исходник, чтобы можно было править варианты голосом
         var variantsError: String?
+        var selectionRewrite: String?  // команда над выделенным текстом: приложение скопирует выделение
     }
 
     var config: Config
@@ -521,6 +522,13 @@ final class Worker {
         send(line, completion: completion)
     }
 
+    /// Переписать выделенный (скопированный) текст по голосовой инструкции.
+    func rewriteSelection(text: String, instruction: String, completion: @escaping (Reply) -> Void) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["rewrite_selection": ["text": text, "instruction": instruction]]),
+              let line = String(data: data, encoding: .utf8) else { return completion(Reply(error: "не собрал запрос")) }
+        send(line, completion: completion)
+    }
+
     /// Голосовая правка вариантов: путь к записи + текущие варианты → новые варианты.
     func refine(_ path: String, variants: [String], body: String, style: String,
                 completion: @escaping (Reply) -> Void) {
@@ -599,6 +607,7 @@ final class Worker {
         r.variantStyle = obj["style"] as? String
         r.variantBody = obj["body"] as? String
         r.variantsError = obj["variants_error"] as? String
+        r.selectionRewrite = obj["selection_rewrite"] as? String
         r.sec = (obj["sec"] as? Double) ?? 0
         r.lang = (obj["lang"] as? String) ?? ""
         if let fixed = obj["fixed"] as? Int, fixed > 0 { r.lang += ", исправлено сегментов: \(fixed)" }
@@ -1556,6 +1565,22 @@ final class App: NSObject, NSApplicationDelegate {
         sendPlayPauseKey()   // повторное нажатие возобновляет то, что мы поставили на паузу
     }
 
+    /// Скопировать выделенный текст из активного приложения (Cmd+C) и вернуть его; буфер обмена восстанавливаем.
+    private func copySelection() -> String? {
+        let pb = NSPasteboard.general
+        let saved = pb.string(forType: .string)
+        pb.clearContents()
+        let src = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)   // 0x08 = C
+        down?.flags = .maskCommand; down?.post(tap: .cghidEventTap)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
+        up?.flags = .maskCommand; up?.post(tap: .cghidEventTap)
+        usleep(160_000)   // дать приложению положить выделение в буфер
+        let sel = pb.string(forType: .string)
+        if let saved = saved { pb.clearContents(); pb.setString(saved, forType: .string) }  // вернуть прежний буфер
+        return sel
+    }
+
     private func startRecording() {
         if !micOK, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { micOK = true }
         guard micOK else {
@@ -1680,6 +1705,19 @@ final class App: NSObject, NSApplicationDelegate {
                 log("ответить не вышло: \(reply.answerError ?? "?")")
                 play("Basso")
                 hud.show("Не смог ответить — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            }
+            return
+        }
+        if let instr = reply.selectionRewrite {
+            // Команда над выделенным текстом: копируем выделение и отправляем на переписывание.
+            if let sel = copySelection(), !sel.isEmpty {
+                let violet = NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1)
+                hud.show("Переписываю выделенное…", symbol: "wand.and.stars", tint: violet, bars: .wave, animate: .pulse)
+                state = .transcribing; updateIcon()
+                worker.rewriteSelection(text: sel, instruction: instr) { [weak self] r in self?.handle(r) }
+            } else {
+                play("Basso")
+                hud.show("Не вижу выделенного текста — выдели и повтори", symbol: "text.cursor", hideAfter: 3)
             }
             return
         }

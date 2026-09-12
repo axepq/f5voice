@@ -441,3 +441,27 @@ def build_refine_messages(variants, instruction, style=""):
     )
     return [{"role": "system", "content": rules},
             {"role": "user", "content": task}]
+
+
+# Переписать ВЫДЕЛЕННЫЙ текст: пользователь выделил текст в приложении и сказал только команду,
+# сославшись на него («исправь этот текст», «сделай выделенное официальным», «перепиши это короче»).
+_SELECTION = re.compile(
+    r"выделенн|(?:^|\s)(?:этот|тот|это)\s+текст|"
+    r"^(?:измени|исправь|поправь|перепиши|переделай|сделай|переведи|сократи|улучши)\s+(?:это|этот|тот)\b",
+    re.IGNORECASE)
+
+
+def selection_instruction(text):
+    """Если фраза — команда над выделенным текстом, вернуть инструкцию (всю фразу), иначе None."""
+    t = (text or "").strip()
+    return t if t and _SELECTION.search(t) else None
+
+
+def selection_command(instruction):
+    """cmd для build_messages при переписывании выделенного: инструкция как есть, грубость по тексту."""
+    rude = False
+    try:
+        rude = _is_rude(instruction)
+    except NameError:
+        rude = False
+    return {"instruction": instruction, "rude": rude, "key": "selection", "title": "выделенное"}
