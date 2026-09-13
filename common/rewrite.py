@@ -176,13 +176,14 @@ def split_command(text, commands=None, keyword=DEFAULT_KEYWORD, auto=True):
     commands = commands if commands is not None else COMMANDS
     if keyword:
         kw = re.escape(keyword)
-        # после конца предложения — с двоеточием или без; после запятой — только с двоеточием,
-        # иначе «Привет, перепиши, как дела?» уйдёт в модель
-        m = re.search(r"(?:(?<=[.!?…])\s*" + kw + r"\s*[:,]?\s+|(?<=[,;:])\s*" + kw + r"\s*:\s*)(?P<i>.{3,})$",
+        # после конца предложения — с любым знаком после маркера или без («перепиши, …»,
+        # «перепиши: …», «перепиши. Сделай …»); после запятой — только с двоеточием,
+        # иначе «Привет, перепиши, как дела?» уйдёт в модель. \b — чтобы не поймать «перепишите».
+        m = re.search(r"(?:(?<=[.!?…])\s*" + kw + r"\b\s*[.,:;!?…-]*\s*|(?<=[,;:])\s*" + kw + r"\b\s*:\s*)(?P<i>.{3,})$",
                       text, flags=re.IGNORECASE | re.DOTALL)
         if not m:
             # Scribe не поставил знак перед маркером: принимаем, только если после идёт приказ.
-            loose = re.search(r"(?:(?<=[\s,;:])|^)" + kw + r"\b\s*[,:]?\s*(?P<i>.{3,})$",
+            loose = re.search(r"(?:(?<=[\s,;:])|^)" + kw + r"\b\s*[.,:;!?…-]*\s*(?P<i>.{3,})$",
                               text, flags=re.IGNORECASE | re.DOTALL)
             if loose and text[:loose.start()].strip() and _looks_like_instruction(loose.group("i")):
                 m = loose

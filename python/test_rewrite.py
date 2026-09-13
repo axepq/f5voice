@@ -369,6 +369,13 @@ class LiveDictation(unittest.TestCase):
                      "Наша компания перепишет договор в срок"):
             self.assertEqual(rewrite.split_command(text, keyword="перепиши", auto=False), (text, None), text)
 
+    def test_marker_as_standalone_sentence(self):
+        # маркер сказан отдельным предложением, инструкция — следующими: «Перепиши. Сделай короче.»
+        body, cmd = rewrite.split_command("Привет, как дела. Перепиши. Сделай немного короче и понятнее.",
+                                          keyword="перепиши", auto=False)
+        self.assertEqual(body, "Привет, как дела.")
+        self.assertIn("Сделай немного короче", cmd["instruction"])
+
     def test_marker_resolves_builtin(self):
         body, cmd = rewrite.split_command("Текст письма. Перепиши: официальный стиль.",
                                           keyword="перепиши", auto=False)
