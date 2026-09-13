@@ -354,6 +354,21 @@ class LiveDictation(unittest.TestCase):
                      "Убери слова-паразиты из этого предложения"):
             self.assertEqual(rewrite.split_command(text, keyword="перепиши", auto=False), (text, None), text)
 
+    def test_marker_without_punctuation_before_it(self):
+        # Scribe не поставил точку перед маркером — принимаем, если после идёт приказ
+        for text in ("Привет как дела перепиши сделай короче",
+                     "текст перепиши в деловом стиле",
+                     "текст перепиши официальным стилем"):
+            _, cmd = rewrite.split_command(text, keyword="перепиши", auto=False)
+            self.assertIsNotNone(cmd, text)
+
+    def test_marker_without_punctuation_needs_command_like_instruction(self):
+        # без знака и без «приказа» после — это обычная речь, не команда
+        for text in ("Привет, перепиши, как дела?",
+                     "Всем привет, перепиши всё к пяти.",
+                     "Наша компания перепишет договор в срок"):
+            self.assertEqual(rewrite.split_command(text, keyword="перепиши", auto=False), (text, None), text)
+
     def test_marker_resolves_builtin(self):
         body, cmd = rewrite.split_command("Текст письма. Перепиши: официальный стиль.",
                                           keyword="перепиши", auto=False)

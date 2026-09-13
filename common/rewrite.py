@@ -151,6 +151,21 @@ def _free_style(text, commands):
     return None
 
 
+# Инструкция-приказ: с этого начинается «сделай короче», «убери воду», «в деловом стиле».
+# По нему принимаем маркер даже без знака перед ним («…дела перепиши сделай короче»), а речь
+# вроде «перепиши, как дела?» отсекаем — там инструкция не похожа на приказ.
+_INSTR_LEAD = re.compile(
+    r"^\s*(?:сделай|сделать|сократи|укороти|расшир\w*|исправь|поправь|убери|удали|переведи|"
+    r"улучши|оформи|переоформи|замени|добавь|разбей|расставь|дополни|напиши|напис\w*|"
+    r"преобраз\w*|перепиши|переделай|сформулируй|приведи)\b", re.IGNORECASE)
+_STYLE_WORD = re.compile(r"\bстил(?:ь|е|я|ем|ём)\b", re.IGNORECASE)  # «в деловом стиле», «стилем»
+
+
+def _looks_like_instruction(instr):
+    """Похоже на приказ (для маркера без знака перед ним): глагол в начале или слово «стиль»."""
+    return bool(_INSTR_LEAD.match(instr) or _STYLE_WORD.search(instr))
+
+
 def split_command(text, commands=None, keyword=DEFAULT_KEYWORD, auto=True):
     """(текст без команды, команда) или (text, None). Команда — только в самом конце
     и только если перед ней есть текст. Ключевое слово проверяется первым: в «перепиши: короче»
@@ -162,9 +177,15 @@ def split_command(text, commands=None, keyword=DEFAULT_KEYWORD, auto=True):
     if keyword:
         kw = re.escape(keyword)
         # после конца предложения — с двоеточием или без; после запятой — только с двоеточием,
-        # иначе «Привет, команда, как дела?» уйдёт в модель
+        # иначе «Привет, перепиши, как дела?» уйдёт в модель
         m = re.search(r"(?:(?<=[.!?…])\s*" + kw + r"\s*[:,]?\s+|(?<=[,;:])\s*" + kw + r"\s*:\s*)(?P<i>.{3,})$",
                       text, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            # Scribe не поставил знак перед маркером: принимаем, только если после идёт приказ.
+            loose = re.search(r"(?:(?<=[\s,;:])|^)" + kw + r"\b\s*[,:]?\s*(?P<i>.{3,})$",
+                              text, flags=re.IGNORECASE | re.DOTALL)
+            if loose and text[:loose.start()].strip() and _looks_like_instruction(loose.group("i")):
+                m = loose
         if m:
             body = text[:m.start()].rstrip().rstrip(",;:")
             instruction = m.group("i").strip()
