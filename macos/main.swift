@@ -323,6 +323,25 @@ func play(_ name: String) {
     NSSound(named: NSSound.Name(name))?.play()
 }
 
+// MediaRemote (приватный фреймворк) отдаёт РЕАЛЬНОЕ состояние play/pause активного плеера,
+// в отличие от CoreAudio, где «устройство открыто» = true даже для музыки на паузе. Грузим один раз.
+private typealias MRIsPlayingFn = @convention(c) (DispatchQueue, @convention(block) (Bool) -> Void) -> Void
+private let mrIsPlayingFn: MRIsPlayingFn? = {
+    guard let h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW),
+          let sym = dlsym(h, "MRMediaRemoteGetNowPlayingApplicationIsPlaying") else { return nil }
+    return unsafeBitCast(sym, to: MRIsPlayingFn.self)
+}()
+
+/// Реально ли сейчас играет музыка (Spotify/Music/браузер), а не просто открыт аудиовыход.
+/// nil — MediaRemote недоступен (нужен запасной способ).
+func mediaRemotePlaying(timeout: Double = 0.25) -> Bool? {
+    guard let fn = mrIsPlayingFn else { return nil }
+    let sem = DispatchSemaphore(value: 0)
+    var playing = false
+    fn(DispatchQueue.global()) { p in playing = p; sem.signal() }
+    return sem.wait(timeout: .now() + timeout) == .timedOut ? nil : playing
+}
+
 // MARK: - Печать текста
 
 let terminalBundleIDs: Set<String> = [
@@ -1565,7 +1584,11 @@ final class App: NSObject, NSApplicationDelegate {
 
     private func pauseMediaForDictation() {
         didPauseMedia = false
-        guard systemAudioPlaying() else { return }   // ничего не играет — не трогаем
+        // Ставим на паузу, только если музыка РЕАЛЬНО играет. MediaRemote отличает play от pause;
+        // CoreAudio (запасной вариант) считает «играет», даже когда плеер на паузе держит выход
+        // открытым — из-за этого раньше Play/Pause по ошибке ВКЛЮЧАЛ отключённую пользователем музыку.
+        let playing = mediaRemotePlaying() ?? systemAudioPlaying()
+        guard playing else { return }
         sendPlayPauseKey()
         didPauseMedia = true
     }
