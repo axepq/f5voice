@@ -325,7 +325,7 @@ func play(_ name: String) {
 
 // MediaRemote (приватный фреймворк) отдаёт РЕАЛЬНОЕ состояние play/pause активного плеера,
 // в отличие от CoreAudio, где «устройство открыто» = true даже для музыки на паузе. Грузим один раз.
-private typealias MRIsPlayingFn = @convention(c) (DispatchQueue, @convention(block) (Bool) -> Void) -> Void
+private typealias MRIsPlayingFn = @convention(c) (DispatchQueue, @escaping @convention(block) (Bool) -> Void) -> Void
 private let mrIsPlayingFn: MRIsPlayingFn? = {
     guard let h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW),
           let sym = dlsym(h, "MRMediaRemoteGetNowPlayingApplicationIsPlaying") else { return nil }
