@@ -1,3 +1,3 @@
-mlx-whisper>=0.4.2
+# macOS: облачное распознавание (ElevenLabs) и переписывание (Grok/DeepSeek) — через сеть,
+# тяжёлых ML-зависимостей нет. numpy нужен для VAD и чтения WAV.
 numpy
-huggingface_hub

@@ -2,8 +2,9 @@
 # F5Voice для macOS на Apple Silicon: установка одной командой.
 #   bash <(curl -fsSL --connect-timeout 20 https://raw.githubusercontent.com/axepq/f5voice/main/install-macos.sh)
 # Можно и из клона репозитория: ./install-macos.sh
-# Ставит Command Line Tools (если их нет), своё Python-окружение с mlx-whisper,
-# скачивает модель, собирает приложение, включает автозапуск. Повторный запуск обновляет.
+# На Mac распознавание и переписывание идут через облако (свои API-ключи в настройках),
+# тяжёлых ML-моделей не качаем. Ставит Command Line Tools (если их нет), лёгкое Python-окружение,
+# собирает приложение, включает автозапуск. Повторный запуск обновляет.
 set -euo pipefail
 
 REPO_URL="https://github.com/axepq/f5voice.git"
@@ -20,7 +21,7 @@ fail() { printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 
 echo "F5Voice: установка для macOS начинается, это займёт несколько минут."
 [[ "$(uname -s)" == Darwin ]] || fail "Это установщик для macOS. Linux — install-linux.sh, Windows — install-windows.ps1"
-[[ "$(uname -m)" == arm64 ]] || fail "Нужен Mac на Apple Silicon (M1 и новее): mlx-whisper не работает на Intel"
+[[ "$(uname -m)" == arm64 ]] || fail "Нужен Mac на Apple Silicon (M1 и новее): приложение собрано под arm64"
 OSV="$(sw_vers -productVersion)"
 [[ "${OSV%%.*}" -ge 14 ]] || fail "Нужна macOS 14 или новее, сейчас $OSV"
 
@@ -105,23 +106,38 @@ fi
 step "Python-окружение в $HOME_DIR/venv"
 [[ -x "$HOME_DIR/venv/bin/python" ]] || python3 -m venv "$HOME_DIR/venv"
 "$HOME_DIR/venv/bin/pip" install --upgrade pip 2>/dev/null | tail -1 || echo "  pip не обновлён (нет сети?) — продолжаю"
-step "Зависимости (mlx-whisper и остальное, около 500 МБ)"
+step "Зависимости (лёгкие, без ML-моделей)"
 "$HOME_DIR/venv/bin/pip" install -r "$SRC/macos/requirements.txt" || fail "pip не смог поставить зависимости"
 
 [[ -f "$HOME_DIR/config.json" ]] || cp "$SRC/macos/config.example.json" "$HOME_DIR/config.json"
-MODEL="$("$HOME_DIR/venv/bin/python" -c "import json;print(json.load(open('$HOME_DIR/config.json')).get('model') or 'mlx-community/whisper-large-v3-turbo')")"
 
-step "Модель $MODEL (первый раз около 1,5 ГБ, ниже будет прогресс)"
-"$HOME_DIR/venv/bin/python" - "$MODEL" <<'PY' || fail "не удалось скачать модель $MODEL — проверь интернет и имя модели в $HOME_DIR/config.json"
-import sys
-from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[1])
+# Ключи API. Распознавание речи (ElevenLabs) — обязательно, иначе диктовка не работает.
+# Переписывание (Grok/DeepSeek) — по желанию. Уже заданный ключ не перезаписываем.
+set_cfg() {  # ключ, значение — записываем в config.json через python (без сторонних пакетов)
+    "$HOME_DIR/venv/bin/python" - "$HOME_DIR/config.json" "$1" "$2" <<'PY'
+import json, sys
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(open(path, encoding="utf-8"))
+cfg[key] = (val.lower() in ("true", "1")) if key.endswith("_enabled") else val
+json.dump(cfg, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
-
-# Переписывание идёт через облачный API (ключ в настройках) — локальные LLM не качаем.
-
-step "Прогрев Python-пакетов (первый импорт компилирует их, иначе первый запуск ждёт полминуты)"
-"$HOME_DIR/venv/bin/python" -c "import mlx_whisper, numpy" >/dev/null 2>&1 || true
+}
+HAS_STT_KEY="$("$HOME_DIR/venv/bin/python" -c "import json;print('1' if (json.load(open('$HOME_DIR/config.json')).get('stt_api_key') or '') else '')")"
+if [[ -z "$HAS_STT_KEY" ]] && { : </dev/tty; } 2>/dev/null; then
+    step "Ключ распознавания речи (ElevenLabs Scribe)"
+    echo "  Получить бесплатно: https://elevenlabs.io → Profile → API Keys (начинается на sk_…)."
+    printf "  Вставь ключ ElevenLabs и нажми Enter (или просто Enter — впишешь потом в настройках): "
+    read -r STT_KEY </dev/tty || STT_KEY=""
+    if [[ -n "$STT_KEY" ]]; then
+        set_cfg stt_api_key "$STT_KEY"; set_cfg stt_enabled true; HAS_STT_KEY=1
+        echo "  ✓ Облачное распознавание включено."
+        printf "  Ключ для переписывания текста (Grok/DeepSeek), по желанию — Enter чтобы пропустить: "
+        read -r RW_KEY </dev/tty || RW_KEY=""
+        [[ -n "$RW_KEY" ]] && { set_cfg rewrite_api_key "$RW_KEY"; echo "  ✓ Переписывание включено (провайдер/модель — в настройках)."; }
+    else
+        echo "  Пропущено. Открой настройки F5Voice и впиши ключ в «Распознавание речи»."
+    fi
+fi
 
 step "Проверка ядра"
 (cd "$SRC" && "$HOME_DIR/venv/bin/python" -m common.selftest | tail -1) || fail "самопроверка ядра не прошла"
@@ -158,5 +174,10 @@ echo "Сейчас macOS спросит два разрешения (один р
 echo "  1. Микрофон — нажать «Разрешить»."
 echo "  2. Универсальный доступ — Системные настройки → Конфиденциальность и безопасность → включить F5Voice."
 echo "Потом: $HOTKEY — запись, ещё раз $HOTKEY — текст в активном поле, Esc — отмена."
+if [[ -z "$HAS_STT_KEY" ]]; then
+    echo
+    echo "ВАЖНО: распознавание работает через облако. Если не вписал ключ ElevenLabs при установке —"
+    echo "открой «Настройки F5Voice…» → «Распознавание речи», включи и вставь ключ, иначе диктовка не заработает."
+fi
 echo "Приложение: $APP — открой его (Launchpad, Spotlight или значок в строке меню → «Настройки F5Voice…»):"
-echo "там сочетание клавиш, стиль плашки, языки, модель, автозапуск и разрешения. Лог: $HOME_DIR/f5voice.log"
+echo "там сочетание клавиш, стиль плашки, языки, ключи API, автозапуск и разрешения. Лог: $HOME_DIR/f5voice.log"
