@@ -1530,58 +1530,6 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    // Пауза музыки на время диктовки, чтобы звук из колонок не попадал в запись.
-    // Универсально через медиа-клавишу Play/Pause (её слушают Spotify, Music, браузер/YouTube и т.п.).
-    // Разрешение Automation не нужно — используется уже выданный Accessibility (как для F5).
-    private var didPauseMedia = false
-
-    /// Играет ли сейчас звук на выходе (любой плеер/браузер) — чтобы не «включить» музыку зря.
-    private func systemAudioPlaying() -> Bool {
-        var dev = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                                              mScope: kAudioObjectPropertyScopeGlobal,
-                                              mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev) == noErr else { return false }
-        var running = UInt32(0)
-        size = UInt32(MemoryLayout<UInt32>.size)
-        addr.mSelector = kAudioDevicePropertyDeviceIsRunningSomewhere
-        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &running) == noErr else { return false }
-        return running != 0
-    }
-
-    /// Отправить системную медиа-клавишу Play/Pause (NX_KEYTYPE_PLAY = 16).
-    private func sendPlayPauseKey() {
-        for down in [true, false] {
-            let data1 = Int((16 << 16) | ((down ? 0xA : 0xB) << 8))
-            let flags = NSEvent.ModifierFlags(rawValue: UInt(down ? 0xA00 : 0xB00))
-            if let ev = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: flags,
-                                           timestamp: 0, windowNumber: 0, context: nil,
-                                           subtype: 8, data1: data1, data2: -1) {
-                ev.cgEvent?.post(tap: .cghidEventTap)
-            }
-        }
-    }
-
-    private func pauseMediaForDictation() {
-        didPauseMedia = false
-        // Ставим на паузу, только если музыка РЕАЛЬНО играет. MediaRemote отличает play от pause;
-        // CoreAudio (запасной вариант) считает «играет», даже когда плеер на паузе держит выход
-        // открытым — из-за этого раньше Play/Pause по ошибке ВКЛЮЧАЛ отключённую пользователем музыку.
-        // best-effort: ставим на паузу, если аудиовыход активен. Точно отличить «играет» от «на
-        // паузе» на macOS нельзя без платной подписи (плееры держат выход открытым и на паузе,
-        // MediaRemote закрыт, захват звука отдаёт тишину неподписанному приложению). Поэтому редкий
-        // случай «сам поставил на паузу и сразу диктуешь» может музыку снова включить — приемлемо.
-        guard systemAudioPlaying() else { return }
-        sendPlayPauseKey()
-        didPauseMedia = true
-    }
-
-    private func resumeMediaAfterDictation() {
-        guard didPauseMedia else { return }
-        didPauseMedia = false
-        sendPlayPauseKey()   // повторное нажатие возобновляет то, что мы поставили на паузу
-    }
 
     /// Скопировать выделенный текст из активного приложения (Cmd+C) и вернуть его; буфер обмена восстанавливаем.
     /// Прочитать выделение через Accessibility (kAXSelectedText) — без буфера и клавиш.
@@ -1643,12 +1591,10 @@ final class App: NSObject, NSApplicationDelegate {
         }
         refining = variantsPanel.isVisible
         worker.ping()
-        pauseMediaForDictation()   // музыку — на паузу, чтобы не попадала в запись
         do {
             try recorder.start(to: lastWav)
         } catch {
             log("запись не началась: \(error.localizedDescription)")
-            resumeMediaAfterDictation()   // запись не пошла — вернуть музыку
             play("Basso")
             hud.show("Не удалось начать запись — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
             return
@@ -1676,7 +1622,6 @@ final class App: NSObject, NSApplicationDelegate {
         meterTimer?.invalidate()
         meterTimer = nil
         let seconds = recorder.stop()
-        resumeMediaAfterDictation()   // диктовка закончена — вернуть музыку
         guard andTranscribe else {
             state = .idle
             updateIcon()
