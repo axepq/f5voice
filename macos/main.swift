@@ -80,7 +80,7 @@ struct Config {
     var model = "mlx-community/whisper-large-v3-turbo"
     var prompt = ""
     var trailingSpace = true
-    var maxRecordSeconds = 180.0
+    var maxRecordSeconds = 1800.0
     var idleUnloadMinutes = 15.0
     var newlineInTerminals = "option"   // option | shift | none
     var newlineElsewhere = "shift"
@@ -1610,9 +1610,12 @@ final class App: NSObject, NSApplicationDelegate {
         }
         RunLoop.main.add(meter, forMode: .common)
         meterTimer = meter
-        let work = DispatchWorkItem { [weak self] in self?.stopRecording(andTranscribe: true) }
-        stopWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + config.maxRecordSeconds, execute: work)
+        // Авто-стоп по времени — только если задан положительный лимит; 0 (или меньше) = без ограничения.
+        if config.maxRecordSeconds > 0 {
+            let work = DispatchWorkItem { [weak self] in self?.stopRecording(andTranscribe: true) }
+            stopWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + config.maxRecordSeconds, execute: work)
+        }
     }
 
     private func stopRecording(andTranscribe: Bool) {

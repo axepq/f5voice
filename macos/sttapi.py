@@ -1,11 +1,12 @@
 """Облачное распознавание речи (Speech-to-Text). Пока ElevenLabs Scribe. Только urllib.
 
 Отправляем WAV-файл, получаем текст. Ключ и модель — из настроек. Речь уходит в облако
-только при включённом облачном STT; иначе распознаёт локальный Whisper.
+только при включённом облачном STT.
 """
 import json
 import mimetypes
 import os
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -47,16 +48,27 @@ def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs",
     if lang and lang.lower() not in ("auto", "ru,en", ""):
         fields["language_code"] = lang.split(",")[0].strip()
     ctype, body = _multipart(fields, path)
-    req = urllib.request.Request(url, data=body, method="POST", headers={
-        "xi-api-key": key,
-        "Content-Type": ctype,
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:200]
-        raise RuntimeError(f"STT {e.code}: {detail}") from None
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"нет связи со STT: {e.reason}") from None
-    return (data.get("text") or "").strip()
+    # 429 (сервер занят) и 5xx у ElevenLabs бывают разово — не роняем диктовку, а переигрываем.
+    delays = (0.0, 1.5, 3.0)
+    last = None
+    for attempt, wait in enumerate(delays):
+        if wait:
+            time.sleep(wait)
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "xi-api-key": key,
+            "Content-Type": ctype,
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return (data.get("text") or "").strip()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:200]
+            last = RuntimeError(f"STT {e.code}: {detail}")
+            if e.code == 429 or 500 <= e.code < 600:
+                continue                      # временная перегрузка — повторяем
+            raise last from None              # 4xx (ключ/квота) — повтор не поможет
+        except urllib.error.URLError as e:
+            last = RuntimeError(f"нет связи со STT: {e.reason}")
+            continue                          # сеть моргнула — повторяем
+    raise last from None
