@@ -6,8 +6,10 @@
 import json
 import mimetypes
 import os
+import queue
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -62,14 +64,23 @@ def _audio_seconds(path):
         return 0.0
 
 
-def _attempt_timeout(audio_sec):
-    """Сколько ждать один ответ. Обычно Scribe отвечает за 1–3 с (87 с речи — за 7 с),
-    но иногда запрос висит десятки секунд; повтор в такой момент проходит быстро."""
-    return 10.0 + 0.1 * audio_sec
+def _hedge_after(audio_sec):
+    """Через сколько без ответа слать тот же файл ещё раз, не обрывая первый запрос.
+    Замер 29.09: один и тот же 7-секундный файл Scribe отдаёт то за 2 с, то за 18–24 с,
+    сеть при этом чистая — задержка на стороне сервера и случайна от запроса к запросу.
+    Быстрые ответы приходят за 1,5–4 с (87 с речи — за 7 с), поэтому ждать дольше незачем."""
+    return 3.5 + 0.05 * audio_sec
+
+
+MAX_PARALLEL = 3   # каждый запрос ElevenLabs тарифицирует отдельно: дубли идут только при задержке
 
 
 def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs", deadline=None):
-    """Распознать WAV через облачный STT. Возвращает текст; бросает исключение при ошибке."""
+    """Распознать WAV через облачный STT. Возвращает текст; бросает исключение при ошибке.
+
+    Запросы идут внахлёст: если первый не ответил за _hedge_after(), вдогонку уходит второй,
+    потом третий; побеждает первый ответ. 4xx (ключ, квота) — сразу ошибка. 429/5xx/обрыв —
+    этот запрос выбывает, остальные продолжают, при нужде уходит замена."""
     url = PROVIDERS.get(provider, PROVIDERS["elevenlabs"])[0]
     fields = {"model_id": model or "scribe_v1"}
     lang = (language or "").strip()
@@ -77,44 +88,69 @@ def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs",
         fields["language_code"] = lang.split(",")[0].strip()
     ctype, body = _multipart(fields, path)
     audio_sec = _audio_seconds(path)
-    per_try = _attempt_timeout(audio_sec)
+    hedge = _hedge_after(audio_sec)
     if deadline is None:
         deadline = budget_for(audio_sec)
-    end = time.monotonic() + deadline
-    # 429 (сервер занят), 5xx, обрыв сети и зависший ответ у ElevenLabs бывают разово —
-    # не роняем диктовку, а переигрываем, пока укладываемся в бюджет.
-    last = None
-    attempt = 0
-    while True:
-        left = end - time.monotonic()
-        if left < 2.0:
-            break
-        attempt += 1
-        timeout = min(per_try, left)
+    t0 = time.monotonic()
+    end = t0 + deadline
+    results = queue.Queue()
+
+    def attempt(n):
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "xi-api-key": key,
             "Content-Type": ctype,
         })
-        started = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=max(1.0, end - time.monotonic())) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            return (data.get("text") or "").strip()
+            results.put((n, "ok", (data.get("text") or "").strip()))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:200]
-            last = RuntimeError(f"STT {e.code}: {detail}")
-            if not (e.code == 429 or 500 <= e.code < 600):
-                raise last from None          # 4xx (ключ/квота) — повтор не поможет
-            _log(f"STT {e.code}, попытка {attempt} — повторяю")
-            time.sleep(min(1.0, max(0.0, end - time.monotonic() - 2.0)))
-        except (TimeoutError, socket.timeout) as e:
-            last = RuntimeError(f"STT не ответил за {timeout:.0f} с")
-            _log(f"STT молчит {time.monotonic() - started:.1f} с, попытка {attempt} — повторяю")
+            fatal = not (e.code == 429 or 500 <= e.code < 600)
+            results.put((n, "fatal" if fatal else "retry", RuntimeError(f"STT {e.code}: {detail}")))
+        except (TimeoutError, socket.timeout):
+            results.put((n, "retry", RuntimeError(f"STT не ответил за {deadline:.0f} с")))
         except urllib.error.URLError as e:
             if isinstance(e.reason, (TimeoutError, socket.timeout)):
-                last = RuntimeError(f"STT не ответил за {timeout:.0f} с")
+                results.put((n, "retry", RuntimeError(f"STT не ответил за {deadline:.0f} с")))
             else:
-                last = RuntimeError(f"нет связи со STT: {e.reason}")
-            _log(f"{last}, попытка {attempt} — повторяю")
-            time.sleep(min(0.5, max(0.0, end - time.monotonic() - 2.0)))
-    raise (last or RuntimeError("STT не ответил")) from None
+                results.put((n, "retry", RuntimeError(f"нет связи со STT: {e.reason}")))
+        except Exception as e:  # noqa: BLE001 — поток не должен умирать молча
+            results.put((n, "retry", RuntimeError(f"STT: {type(e).__name__}: {e}")))
+
+    started = 0
+    in_flight = 0
+    last = None
+    next_at = t0
+
+    while True:
+        now = time.monotonic()
+        if now >= end - 0.2 and in_flight == 0:
+            break
+        if in_flight < MAX_PARALLEL and started < MAX_PARALLEL + 2 and now >= next_at and end - now > 2.0:
+            started += 1
+            in_flight += 1
+            if started > 1:
+                _log(f"STT молчит {now - t0:.1f} с — шлю запрос {started} вдогонку")
+            threading.Thread(target=attempt, args=(started,), daemon=True).start()
+            next_at = now + hedge
+        wait = end - time.monotonic()
+        if in_flight < MAX_PARALLEL and started < MAX_PARALLEL + 2:
+            wait = min(wait, next_at - time.monotonic())
+        try:
+            n, kind, val = results.get(timeout=max(0.05, wait))
+        except queue.Empty:
+            if time.monotonic() >= end:
+                break
+            continue
+        in_flight -= 1
+        if kind == "ok":
+            if started > 1:
+                _log(f"STT ответил на запрос {n} из {started} за {time.monotonic() - t0:.1f} с")
+            return val
+        last = val
+        if kind == "fatal":
+            raise last from None
+        _log(f"{last} (запрос {n})")
+        next_at = min(next_at, time.monotonic() + 0.5)   # выбывший заменяем почти сразу
+    raise (last or RuntimeError(f"STT не ответил за {deadline:.0f} с")) from None

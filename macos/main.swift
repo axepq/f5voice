@@ -516,7 +516,7 @@ final class Worker {
         }
         process = p
         stdinPipe = inPipe
-        log("воркер запущен, pid \(p.processIdentifier), грузит модель \(config.model)")
+        log("воркер запущен, pid \(p.processIdentifier) (распознавание облачное, \(config.sttProvider))")
     }
 
     /// Останавливает воркер. Если он что-то распознавал, запрос завершается ошибкой `reason`.
@@ -604,7 +604,7 @@ final class Worker {
         }
         if obj["ready"] as? Bool == true {
             isReady = true
-            log("модель загружена за \(obj["load_sec"] ?? 0) с")
+            log("воркер готов")
             flush()
             onReady?()
             return
