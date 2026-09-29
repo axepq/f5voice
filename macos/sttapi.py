@@ -6,10 +6,17 @@
 import json
 import mimetypes
 import os
+import socket
+import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
+import wave
+
+def _log(msg):
+    print(time.strftime("%H:%M:%S"), msg, file=sys.stderr, flush=True)
+
 
 # провайдер -> (url, модель по умолчанию)
 PROVIDERS = {
@@ -40,7 +47,26 @@ def _multipart(fields, filepath):
     return "multipart/form-data; boundary=" + boundary, bytes(buf)
 
 
-def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs", timeout=60):
+# Приложение считает воркер зависшим через 30 с (transcribeTimeoutSeconds в main.swift) и убивает его
+# вместе с запросом — текст пропадает. Поэтому все попытки укладываем в меньший бюджет.
+DEADLINE_SEC = 26.0
+
+
+def _audio_seconds(path):
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except (wave.Error, OSError, EOFError):
+        return 0.0
+
+
+def _attempt_timeout(audio_sec):
+    """Сколько ждать один ответ. Обычно Scribe отвечает за 1–3 с (87 с речи — за 7 с),
+    но иногда запрос висит десятки секунд; повтор в такой момент проходит быстро."""
+    return 10.0 + 0.1 * audio_sec
+
+
+def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs", deadline=DEADLINE_SEC):
     """Распознать WAV через облачный STT. Возвращает текст; бросает исключение при ошибке."""
     url = PROVIDERS.get(provider, PROVIDERS["elevenlabs"])[0]
     fields = {"model_id": model or "scribe_v1"}
@@ -48,16 +74,23 @@ def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs",
     if lang and lang.lower() not in ("auto", "ru,en", ""):
         fields["language_code"] = lang.split(",")[0].strip()
     ctype, body = _multipart(fields, path)
-    # 429 (сервер занят) и 5xx у ElevenLabs бывают разово — не роняем диктовку, а переигрываем.
-    delays = (0.0, 1.5, 3.0)
+    per_try = _attempt_timeout(_audio_seconds(path))
+    end = time.monotonic() + deadline
+    # 429 (сервер занят), 5xx, обрыв сети и зависший ответ у ElevenLabs бывают разово —
+    # не роняем диктовку, а переигрываем, пока укладываемся в бюджет.
     last = None
-    for attempt, wait in enumerate(delays):
-        if wait:
-            time.sleep(wait)
+    attempt = 0
+    while True:
+        left = end - time.monotonic()
+        if left < 2.0:
+            break
+        attempt += 1
+        timeout = min(per_try, left)
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "xi-api-key": key,
             "Content-Type": ctype,
         })
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -65,10 +98,18 @@ def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs",
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:200]
             last = RuntimeError(f"STT {e.code}: {detail}")
-            if e.code == 429 or 500 <= e.code < 600:
-                continue                      # временная перегрузка — повторяем
-            raise last from None              # 4xx (ключ/квота) — повтор не поможет
+            if not (e.code == 429 or 500 <= e.code < 600):
+                raise last from None          # 4xx (ключ/квота) — повтор не поможет
+            _log(f"STT {e.code}, попытка {attempt} — повторяю")
+            time.sleep(min(1.0, max(0.0, end - time.monotonic() - 2.0)))
+        except (TimeoutError, socket.timeout) as e:
+            last = RuntimeError(f"STT не ответил за {timeout:.0f} с")
+            _log(f"STT молчит {time.monotonic() - started:.1f} с, попытка {attempt} — повторяю")
         except urllib.error.URLError as e:
-            last = RuntimeError(f"нет связи со STT: {e.reason}")
-            continue                          # сеть моргнула — повторяем
-    raise last from None
+            if isinstance(e.reason, (TimeoutError, socket.timeout)):
+                last = RuntimeError(f"STT не ответил за {timeout:.0f} с")
+            else:
+                last = RuntimeError(f"нет связи со STT: {e.reason}")
+            _log(f"{last}, попытка {attempt} — повторяю")
+            time.sleep(min(0.5, max(0.0, end - time.monotonic() - 2.0)))
+    raise (last or RuntimeError("STT не ответил")) from None
