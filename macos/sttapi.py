@@ -47,9 +47,11 @@ def _multipart(fields, filepath):
     return "multipart/form-data; boundary=" + boundary, bytes(buf)
 
 
-# Приложение считает воркер зависшим через 30 с (transcribeTimeoutSeconds в main.swift) и убивает его
-# вместе с запросом — текст пропадает. Поэтому все попытки укладываем в меньший бюджет.
-DEADLINE_SEC = 26.0
+def budget_for(audio_sec):
+    """Сколько всего можно потратить на попытки. Приложение считает воркер зависшим на 4 с позже
+    (transcribeTimeoutSeconds в main.swift: 30 + 0,2 с на секунду записи) и убивает его вместе
+    с запросом — поэтому бюджет строго меньше. Формулы меняются вместе."""
+    return 26.0 + 0.2 * max(0.0, audio_sec)
 
 
 def _audio_seconds(path):
@@ -66,7 +68,7 @@ def _attempt_timeout(audio_sec):
     return 10.0 + 0.1 * audio_sec
 
 
-def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs", deadline=DEADLINE_SEC):
+def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs", deadline=None):
     """Распознать WAV через облачный STT. Возвращает текст; бросает исключение при ошибке."""
     url = PROVIDERS.get(provider, PROVIDERS["elevenlabs"])[0]
     fields = {"model_id": model or "scribe_v1"}
@@ -74,7 +76,10 @@ def transcribe(path, key, model="scribe_v1", language="", provider="elevenlabs",
     if lang and lang.lower() not in ("auto", "ru,en", ""):
         fields["language_code"] = lang.split(",")[0].strip()
     ctype, body = _multipart(fields, path)
-    per_try = _attempt_timeout(_audio_seconds(path))
+    audio_sec = _audio_seconds(path)
+    per_try = _attempt_timeout(audio_sec)
+    if deadline is None:
+        deadline = budget_for(audio_sec)
     end = time.monotonic() + deadline
     # 429 (сервер занят), 5xx, обрыв сети и зависший ответ у ElevenLabs бывают разово —
     # не роняем диктовку, а переигрываем, пока укладываемся в бюджет.

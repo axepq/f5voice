@@ -28,6 +28,7 @@ let configPath = homeDir + "/config.json"
 let workerScript = homeDir + "/src/macos/worker.py"
 let python = homeDir + "/venv/bin/python"
 let lastWav = homeDir + "/last.wav"
+let failedWav = homeDir + "/failed.wav"   // запись, которую не удалось распознать: следующая её не затрёт
 let logPath = homeDir + "/f5voice.log"
 let launchdLabel = "com.alex.f5voice"
 let cancelCode: Int64 = 53                 // Esc
@@ -63,7 +64,15 @@ let builtinStyleList: [(phrase: String, summary: String)] = [
     ("команда: своя инструкция", "например «команда: сделай списком»"),
 ]
 let spareKeyUsage: UInt64 = 0x70000006C    // F17 на странице клавиатуры
-let transcribeTimeoutSeconds: Double = 30  // дольше — воркер считается зависшим и перезапускается
+/// Сколько ждать распознавания, прежде чем считать воркер зависшим и перезапустить. Растёт с длиной
+/// записи и на 4 с больше бюджета воркера (sttapi.budget_for: 26 + 0,2 с на секунду записи) —
+/// иначе воркер убивают раньше, чем он успеет повторить зависший запрос. Меняются вместе.
+func transcribeTimeoutSeconds(forAudio seconds: Double) -> Double { 30 + 0.2 * max(0, seconds) }
+
+func wavSeconds(_ path: String) -> Double {
+    guard let f = try? AVAudioFile(forReading: URL(fileURLWithPath: path)) else { return 0 }
+    return Double(f.length) / f.fileFormat.sampleRate
+}
 let rewriteTimeoutSeconds: Double = 120     // переписывание моделью: загрузка + генерация длинного текста
 let loadTimeoutSeconds: Double = 600        // воркер грузит (или качает) модель Whisper до отправки запроса
 let isService = CommandLine.arguments.contains("--service")  // запущены службой launchd, а не вручную
@@ -1104,6 +1113,9 @@ final class App: NSObject, NSApplicationDelegate {
     private var micOK = false
     private var meterTimer: Timer?
     private var stopWork: DispatchWorkItem?
+    private var audioSeconds: Double = 0   // длина записи, которая сейчас распознаётся
+    private var audioPath = lastWav
+    private var retryItem: NSMenuItem!
     private var transcribeTimeout: DispatchWorkItem?
     private var signalSources: [DispatchSourceSignal] = []
     private var activity: NSObjectProtocol?
@@ -1126,7 +1138,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         worker.onSent = { [weak self] in
             guard let self = self, self.state == .transcribing else { return }
-            self.armTimeout(transcribeTimeoutSeconds, what: "воркер не ответил")
+            self.armTimeout(transcribeTimeoutSeconds(forAudio: self.audioSeconds), what: "воркер не ответил")
         }
         worker.onStatus = { [weak self] status, command in
             guard let self = self, self.state == .transcribing else { return }
@@ -1392,6 +1404,8 @@ final class App: NSObject, NSApplicationDelegate {
         hotkeyItem = NSMenuItem(title: hotkeyTitle(), action: nil, keyEquivalent: "")
         menu.addItem(hotkeyItem)
         menu.addItem(NSMenuItem(title: "Начать / остановить запись", action: #selector(menuToggle), keyEquivalent: ""))
+        retryItem = NSMenuItem(title: "Распознать заново последнюю неудачную запись", action: #selector(retryFailed), keyEquivalent: "")
+        menu.addItem(retryItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Настройки F5Voice…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Перечитать config.json", action: #selector(reloadConfig), keyEquivalent: "r"))
@@ -1400,6 +1414,7 @@ final class App: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Выключить до следующего входа (клавиша вернётся системе)", action: #selector(quit), keyEquivalent: "q"))
         for item in menu.items { item.target = self }
         statusItem.menu = menu
+        updateRetryItem()
         updateIcon()
     }
 
@@ -1641,6 +1656,8 @@ final class App: NSObject, NSApplicationDelegate {
             let violet = NSColor(calibratedRed: 0.86, green: 0.7, blue: 1.0, alpha: 1)
             hud.show("Меняю варианты…   Esc — отменить", symbol: "wand.and.stars", tint: violet, bars: .wave, animate: .pulse)
             log(String(format: "записано %.1f с, правлю варианты", seconds))
+            audioPath = ""   // правка вариантов — не диктовка, «Распознать заново» к ней не относится
+            audioSeconds = seconds
             worker.refine(lastWav, variants: variantsPanel.variantTexts,
                           body: variantsPanel.bodyText, style: variantsPanel.styleText) { [weak self] reply in
                 self?.handle(reply)
@@ -1648,10 +1665,45 @@ final class App: NSObject, NSApplicationDelegate {
         } else {
             showTranscribing()
             log(String(format: "записано %.1f с, распознаю", seconds))
-            worker.transcribe(lastWav) { [weak self] reply in
-                self?.handle(reply)
-            }
+            recognize(lastWav, seconds: seconds)
         }
+    }
+
+    private func recognize(_ path: String, seconds: Double) {
+        audioPath = path
+        audioSeconds = seconds
+        worker.transcribe(path) { [weak self] reply in
+            self?.handle(reply)
+        }
+    }
+
+    /// Не распознанную запись откладываем в failed.wav: следующая диктовка перезапишет last.wav.
+    private func keepFailedAudio() {
+        guard audioPath == lastWav else { return }   // повтор из failed.wav — файл и так на месте
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: failedWav)
+        do {
+            try fm.copyItem(atPath: lastWav, toPath: failedWav)
+            log("запись сохранена в \(failedWav) — меню F5Voice → «Распознать заново»")
+        } catch {
+            log("не смог сохранить запись: \(error.localizedDescription)")
+        }
+        updateRetryItem()
+    }
+
+    private func updateRetryItem() {
+        retryItem?.isHidden = !FileManager.default.fileExists(atPath: failedWav)
+    }
+
+    @objc func retryFailed() {
+        guard state == .idle, FileManager.default.fileExists(atPath: failedWav) else { return }
+        state = .transcribing
+        updateIcon()
+        armTimeout(loadTimeoutSeconds, what: "воркер не загрузил модель")
+        showTranscribing()
+        let seconds = wavSeconds(failedWav)
+        log(String(format: "повторно распознаю сохранённую запись %.1f с", seconds))
+        recognize(failedWav, seconds: seconds)
     }
 
     /// Перезапустить воркер, если он не ответил за `seconds`; предыдущий таймер отменяется.
@@ -1681,8 +1733,15 @@ final class App: NSObject, NSApplicationDelegate {
         if let err = reply.error {
             log("ошибка распознавания: \(err)")
             play("Basso")
-            hud.show("Ошибка распознавания — смотри лог", symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 4)
+            keepFailedAudio()
+            hud.show("Не распознал — запись сохранена: меню F5Voice → «Распознать заново»",
+                     symbol: "exclamationmark.triangle.fill", tint: .systemOrange, hideAfter: 6)
             return
+        }
+        if audioPath == failedWav {   // повтор удался — отложенная запись больше не нужна
+            try? FileManager.default.removeItem(atPath: failedWav)
+            audioPath = lastWav
+            updateRetryItem()
         }
         if let variants = reply.variants {
             log("вариантов: \(variants.count)")
