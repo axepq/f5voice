@@ -564,6 +564,12 @@ final class Worker {
         try? pipe.fileHandleForWriting.write(contentsOf: "\n".data(using: .utf8)!)
     }
 
+    /// Воркер поднялся уже во время записи (пинг до него не дошёл): пусть стримит текущий last.wav.
+    func streamCurrentRecording() {
+        guard isReady, pending == nil, let pipe = stdinPipe else { return }
+        try? pipe.fileHandleForWriting.write(contentsOf: "{\"stream\":\"now\"}\n".data(using: .utf8)!)
+    }
+
     private func send(_ line: String, completion: @escaping (Reply) -> Void) {
         if let old = pending {
             old.completion(Reply(error: "вытеснено новым запросом"))
@@ -1133,7 +1139,9 @@ final class App: NSObject, NSApplicationDelegate {
         checkAccessibility()
         worker.start()
         worker.onReady = { [weak self] in
-            guard let self = self, self.state == .transcribing else { return }
+            guard let self = self else { return }
+            if self.state == .recording { self.worker.streamCurrentRecording() }
+            guard self.state == .transcribing else { return }
             self.showTranscribing()
         }
         worker.onSent = { [weak self] in
@@ -1605,9 +1613,11 @@ final class App: NSObject, NSApplicationDelegate {
             return
         }
         refining = variantsPanel.isVisible
-        worker.ping()
         do {
             try recorder.start(to: lastWav)
+            // Пинг — после старта: last.wav уже новый, воркер сразу стримит его в облако.
+            // До старта воркер мог принять за новую запись ещё не удалённый старый файл.
+            worker.ping()
         } catch {
             log("запись не началась: \(error.localizedDescription)")
             play("Basso")

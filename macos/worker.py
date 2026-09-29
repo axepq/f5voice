@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from llm import Rewriter  # noqa: E402
 import apillm  # noqa: E402
 import sttapi  # noqa: E402
+import sttstream  # noqa: E402
 
 HOME_DIR = Path(os.environ.get("F5VOICE_HOME") or Path.home() / ".f5voice")
 
@@ -183,13 +184,42 @@ def do_rewrite(llm, rw, body, cmd):
 
 
 def main():
+    stream = {"s": None}   # потоковая сессия текущей записи (sttstream.Session)
+
+    def start_stream():
+        """Запись началась — открыть поток. Приложение шлёт пинг (или {"stream":"now"}, если воркер
+        поднялся посреди записи) уже после того, как начало писать новый last.wav."""
+        drop_stream()
+        stt = stt_settings()
+        if not stt["enabled"] or stt["provider"] != "elevenlabs":
+            return
+        if sttstream.connect is None:
+            log("потоковое распознавание недоступно: нет пакета websockets — ставлю обычные запросы")
+            return
+        stream["s"] = sttstream.Session(str(HOME_DIR / "last.wav"), stt["key"], log)
+
+    def drop_stream():
+        sess, stream["s"] = stream["s"], None
+        if sess is not None:
+            sess.close()
+
     def cloud_recognize(path):
         """Распознать WAV облачным STT; вернуть (text, lang, scores, fixed), как прежний recognize().
         Локального Whisper больше нет — при выключенном/недоступном облаке поднимаем ошибку."""
         stt = stt_settings()
         if not stt["enabled"]:
             raise RuntimeError("облачное распознавание выключено — задай stt_* в config.json")
-        raw = sttapi.transcribe(path, stt["key"], stt["model"], stt["language"], stt["provider"])
+        raw = None
+        sess, stream["s"] = stream["s"], None
+        if sess is not None:
+            t = time.time()
+            raw = sess.finish(path)
+            if raw is None:
+                log(f"поток не сработал ({sess.error or 'нет текста'}) — распознаю обычным запросом")
+            else:
+                log(f"поток: текст через {time.time() - t:.2f} с после записи")
+        if raw is None:
+            raw = sttapi.transcribe(path, stt["key"], stt["model"], stt["language"], stt["provider"])
         text = finalize(raw, PROMPT)
         if fix_cmd_enabled():
             text = fix_command_endings(text)
@@ -220,6 +250,10 @@ def main():
         if not path:  # пинг: приложение начало запись, модель нужна живой
             if llm.loaded:
                 llm.last_use = last_use
+            start_stream()
+            continue
+        if path == '{"stream":"now"}':  # воркер поднялся посреди записи — стримим её
+            start_stream()
             continue
         if path.startswith("{"):  # команда без звука
             try:
@@ -266,10 +300,12 @@ def main():
             try:
                 audio = load_audio(path)
             except ValueError:  # короче 1/8 секунды — случайное нажатие
+                drop_stream()
                 out({"text": "", "reason": "silence", "dur": 0})
                 continue
             quiet, dur, speech = is_silence(audio)
             if quiet:
+                drop_stream()
                 out({"text": "", "reason": "silence", "dur": dur, "speech": speech})
                 continue
             try:
